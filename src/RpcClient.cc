@@ -3,9 +3,9 @@
 #include <assert.h>
 
 RpcClient::RpcClient(EventLoop *loop, const InetAddress &serverAddr)
-    : hasConnectAttempted_(false), loop_(checkedLoop(loop)),
-      status_(Status::kDisconnected), tcpClient_(loop_, serverAddr),
-      timeoutCronTimerId(std::nullopt) {
+    : hasConnectAttempted_(false), maxPendingRequests_(std::nullopt),
+      loop_(checkedLoop(loop)), status_(Status::kDisconnected),
+      tcpClient_(loop_, serverAddr), timeoutCronTimerId(std::nullopt) {
   loop_->assertInLoopThread();
 
   codec_.setMessageCallback(std::bind(&RpcClient::onRpcMessage, this,
@@ -61,6 +61,7 @@ void RpcClient::connect() {
   hasConnectAttempted_ = true;
   tcpClient_.connect();
 }
+
 void RpcClient::disconnect() {
   loop_->assertInLoopThread();
   if (status_ != Status::kConnected && status_ != Status::kConnecting) {
@@ -95,6 +96,14 @@ void RpcClient::enableRetry() {
 void RpcClient::disableRetry() {
   loop_->assertInLoopThread();
   tcpClient_.disableRetry();
+}
+
+void RpcClient::setMaxPendingRequests(size_t maxPendingRequests) {
+  assert(maxPendingRequests > 0);
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+
+  maxPendingRequests_ = maxPendingRequests;
 }
 
 EventLoop *RpcClient::checkedLoop(EventLoop *loop) {
@@ -216,6 +225,15 @@ void RpcClient::callInLoop(const std::string &service,
   do {
     if ((status_ == Status::kConnected) && (conn_ != nullptr) &&
         (conn_->connected())) {
+
+      if (maxPendingRequests_.has_value() &&
+          pendingRequests_.size() >= maxPendingRequests_) {
+        RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+                             "too many pending requests");
+        cb(response);
+        return;
+      }
+
       RpcRequest request(requestId, service, method, payload);
       std::string output;
       std::string errorMsg;

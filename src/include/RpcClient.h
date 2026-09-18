@@ -9,6 +9,7 @@
 #include "TcpConnection.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -34,6 +35,8 @@ public:
 
   void enableRetry();
   void disableRetry();
+
+  void setMaxPendingRequests(size_t maxPendingRequests);
 
 private:
   static EventLoop *checkedLoop(EventLoop *loop);
@@ -62,6 +65,7 @@ private:
 
   bool hasConnectAttempted_;
   uint64_t nextRequestId_ = 1;
+  std::optional<size_t> maxPendingRequests_;
   EventLoop *loop_;
   Status status_;
   LengthHeaderCodec codec_;

@@ -1958,9 +1958,8 @@ void rpc_client_disabling_retry_prevents_reconnection_test() {
     client.disableRetry();
     server.start();
 
-    loop.runAfter(std::chrono::milliseconds(200), [&]() {
-      server.stop(std::chrono::milliseconds(0));
-    });
+    loop.runAfter(std::chrono::milliseconds(200),
+                  [&]() { server.stop(std::chrono::milliseconds(0)); });
   });
   client.connect();
 
@@ -1984,6 +1983,383 @@ void rpc_client_disabling_retry_prevents_reconnection_test() {
   assert(clientConnectErrorCnt == 1);
 }
 
+void rpc_client_rejects_call_when_max_pending_requests_is_reached_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromose;
+  auto stopCompleteFuture = stopCompletePromose.get_future();
+
+  int connected = 0;
+  int pendingRequestClosed = 0;
+  int overLimitRequestRejected = 0;
+  int clientDisconnected = 0;
+  int serverRequestReceived = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback(
+      [&](const TcpConnectionPtr &conn, const std::string &) {
+        ++serverRequestReceived;
+        return;
+      });
+
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromose.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kUnsuccess);
+                    assert(response.getPayload().empty());
+                    assert(response.getErrorMessage() == "connect closed");
+
+                    ++pendingRequestClosed;
+                  });
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "too many pending requests");
+
+            ++overLimitRequestRejected;
+            client.disconnect();
+          });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.setMaxPendingRequests(1);
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverRequestReceived == 1);
+  assert(pendingRequestClosed == 1);
+  assert(overLimitRequestRejected == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_client_releases_pending_capacity_before_response_callback_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromose;
+  auto stopCompleteFuture = stopCompletePromose.get_future();
+
+  int connected = 0;
+  int firstRequestCnt = 0;
+  int secondRequestCnt = 0;
+  int clientDisconnected = 0;
+  int serverRequestReceived = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback(
+      [&](const TcpConnectionPtr &conn, const std::string &msg) {
+        ++serverRequestReceived;
+
+        RpcRequest request;
+        std::string errorMessage;
+        bool res = request.decode(msg, errorMessage);
+        if (!res || !errorMessage.empty()) {
+          conn->forceClose();
+          return;
+        }
+
+        {
+          RpcResponse response(request.getRequestId(), ResponseResult::kSuccess,
+                               request.getPayload(), "");
+          std::string outputMessage;
+          std::string errorMessage;
+          bool res = response.encode(outputMessage, errorMessage);
+          if (!res || !errorMessage.empty()) {
+            conn->forceClose();
+            return;
+          }
+
+          if (conn->connected()) {
+            codec.send(conn, outputMessage.data(), outputMessage.length());
+          }
+        }
+
+        return;
+      });
+
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromose.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            assert(response.getResponseResult() == ResponseResult::kSuccess);
+            assert(response.getPayload() == "hello world");
+            assert(response.getErrorMessage().empty());
+
+            ++firstRequestCnt;
+
+            client.call("EchoService", "Echo", "hello world",
+                        [&](const RpcResponse &response) {
+                          assert(response.getResponseResult() ==
+                                 ResponseResult::kSuccess);
+                          assert(response.getPayload() == "hello world");
+                          assert(response.getErrorMessage().empty());
+
+                          ++secondRequestCnt;
+                          client.disconnect();
+                        });
+          });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.setMaxPendingRequests(1);
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverRequestReceived == 2);
+  assert(firstRequestCnt == 1);
+  assert(secondRequestCnt == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_client_releases_pending_capacity_after_request_timeout_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromose;
+  auto stopCompleteFuture = stopCompletePromose.get_future();
+
+  int connected = 0;
+  int timeoutCallbackCount = 0;
+  int successCallbackCount = 0;
+  int clientDisconnected = 0;
+  int serverRequestReceived = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback(
+      [&](const TcpConnectionPtr &conn, const std::string &msg) {
+        ++serverRequestReceived;
+
+        if (serverRequestReceived == 1) {
+          return;
+        }
+
+        RpcRequest request;
+        std::string errorMessage;
+        bool res = request.decode(msg, errorMessage);
+        if (!res || !errorMessage.empty()) {
+          conn->forceClose();
+          return;
+        }
+
+        {
+          RpcResponse response(request.getRequestId(), ResponseResult::kSuccess,
+                               request.getPayload(), "");
+          std::string outputMessage;
+          std::string errorMessage;
+          bool res = response.encode(outputMessage, errorMessage);
+          if (!res || !errorMessage.empty()) {
+            conn->forceClose();
+            return;
+          }
+
+          if (conn->connected()) {
+            codec.send(conn, outputMessage.data(), outputMessage.length());
+          }
+        }
+
+        return;
+      });
+
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromose.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "rpc request timeout");
+
+            ++timeoutCallbackCount;
+
+            client.call("EchoService", "Echo", "hello world",
+                        [&](const RpcResponse &response) {
+                          assert(response.getResponseResult() ==
+                                 ResponseResult::kSuccess);
+                          assert(response.getPayload() == "hello world");
+                          assert(response.getErrorMessage().empty());
+
+                          ++successCallbackCount;
+                          client.disconnect();
+                        });
+          }, std::chrono::milliseconds(100));
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.setMaxPendingRequests(1);
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverRequestReceived == 2);
+  assert(timeoutCallbackCount == 1);
+  assert(successCallbackCount == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
 int main() {
   rpc_server_processes_echo_request_test();
   rpc_client_calls_echo_service_test();
@@ -2005,4 +2381,7 @@ int main() {
   rpc_client_reconnects_after_connection_closes_and_allows_new_call_test();
   rpc_client_reconnects_after_initial_connection_failure_test();
   rpc_client_disabling_retry_prevents_reconnection_test();
+  rpc_client_rejects_call_when_max_pending_requests_is_reached_test();
+  rpc_client_releases_pending_capacity_before_response_callback_test();
+  rpc_client_releases_pending_capacity_after_request_timeout_test();
 }
