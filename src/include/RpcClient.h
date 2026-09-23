@@ -8,6 +8,7 @@
 #include "TcpClient.h"
 #include "TcpConnection.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -29,14 +30,25 @@ public:
   void connect();
   void disconnect();
 
-  void call(const std::string &service, const std::string &method,
-            const std::string &payload, RpcCallback cb,
-            std::chrono::milliseconds timeout = std::chrono::milliseconds{0});
+  uint64_t call(const std::string &service, const std::string &method,
+                const std::string &payload, RpcCallback cb);
+
+  uint64_t call(const std::string &service, const std::string &method,
+                const std::string &payload, RpcCallback cb,
+                std::chrono::milliseconds timeout);
 
   void enableRetry();
   void disableRetry();
 
   void setMaxPendingRequests(size_t maxPendingRequests);
+
+  /**
+   * RpcClient 默认超时为 0ms，表示不启用超时；调用 setDefaultTimeout 可在首次
+   * connect() 前修改它。
+   */
+  void setDefaultTimeout(std::chrono::milliseconds defaultTimeout);
+
+  void cancel(uint64_t requestId);
 
 private:
   static EventLoop *checkedLoop(EventLoop *loop);
@@ -46,14 +58,16 @@ private:
   void failAllPendingRequests(std::string errorMessage);
   void onRequestTimeout(uint64_t requestId);
 
-  void callInLoop(const std::string &service, const std::string &method,
-                  const std::string &payload, RpcCallback cb,
-                  std::chrono::milliseconds timeout);
+  void callInLoop(uint64_t requestId, const std::string &service,
+                  const std::string &method, const std::string &payload,
+                  RpcCallback cb, std::chrono::milliseconds timeout);
 
-  void timeoutCron();
+  void clearExpiredIgnoredResponseRequests();
 
   void clearPendingRequests();
-  void clearTimedOutRequests();
+  void clearIgnoredResponseRequests();
+
+  void cancelInLoop(uint64_t requestId);
 
 private:
   enum class Status { kDisconnected, kConnecting, kDisconnecting, kConnected };
@@ -64,8 +78,9 @@ private:
   };
 
   bool hasConnectAttempted_;
-  uint64_t nextRequestId_ = 1;
+  std::atomic<uint64_t> nextRequestId_ = 1;
   std::optional<size_t> maxPendingRequests_;
+  std::chrono::milliseconds defaultTimeout_;
   EventLoop *loop_;
   Status status_;
   LengthHeaderCodec codec_;
@@ -74,9 +89,9 @@ private:
   ConnectionCallback connectionCallback_;
   ConnectionErrorCallback connectionErrorCallback_;
   std::unordered_map<uint64_t, PendingRequest> pendingRequests_;
-  std::optional<TimerId> timeoutCronTimerId;
+  std::optional<TimerId> clearIgnoredResponseRequestsTimerId_;
   std::unordered_map<uint64_t, std::chrono::steady_clock::time_point>
-      timeoutRequests_;
+      ignoredResponseRequests_;
 };
 
 #endif

@@ -33,6 +33,8 @@ public:
   bool registerMethod(const std::string &service, const std::string &method,
                       RpcHandler handler);
 
+  bool unregisterMethod(const std::string &service, const std::string &method);
+
 private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 

@@ -4,8 +4,9 @@
 
 RpcClient::RpcClient(EventLoop *loop, const InetAddress &serverAddr)
     : hasConnectAttempted_(false), maxPendingRequests_(std::nullopt),
-      loop_(checkedLoop(loop)), status_(Status::kDisconnected),
-      tcpClient_(loop_, serverAddr), timeoutCronTimerId(std::nullopt) {
+      defaultTimeout_(std::chrono::milliseconds(0)), loop_(checkedLoop(loop)),
+      status_(Status::kDisconnected), tcpClient_(loop_, serverAddr),
+      clearIgnoredResponseRequestsTimerId_(std::nullopt) {
   loop_->assertInLoopThread();
 
   codec_.setMessageCallback(std::bind(&RpcClient::onRpcMessage, this,
@@ -22,19 +23,19 @@ RpcClient::RpcClient(EventLoop *loop, const InetAddress &serverAddr)
   tcpClient_.setPeerHalfCloseCallback(
       [](const TcpConnectionPtr &conn) { conn->shutdown(); });
 
-  timeoutCronTimerId =
-      loop_->runEvery(std::chrono::milliseconds(1000),
-                      std::bind(&RpcClient::timeoutCron, this));
+  clearIgnoredResponseRequestsTimerId_ = loop_->runEvery(
+      std::chrono::milliseconds(1000),
+      std::bind(&RpcClient::clearExpiredIgnoredResponseRequests, this));
 }
 
 RpcClient::~RpcClient() {
   loop_->assertInLoopThread();
 
   clearPendingRequests();
-  clearTimedOutRequests();
+  clearIgnoredResponseRequests();
 
-  if (timeoutCronTimerId.has_value()) {
-    loop_->cancel(timeoutCronTimerId.value());
+  if (clearIgnoredResponseRequestsTimerId_.has_value()) {
+    loop_->cancel(clearIgnoredResponseRequestsTimerId_.value());
   }
 }
 
@@ -72,20 +73,43 @@ void RpcClient::disconnect() {
   tcpClient_.disconnect();
 }
 
-void RpcClient::call(const std::string &service, const std::string &method,
-                     const std::string &payload, RpcCallback cb,
-                     std::chrono::milliseconds timeout) {
+uint64_t RpcClient::call(const std::string &service, const std::string &method,
+                         const std::string &payload, RpcCallback cb) {
+  assert(cb != nullptr);
+
+  uint64_t requestId = nextRequestId_.fetch_add(1);
+
+  if (loop_->isInLoopThread()) {
+    callInLoop(requestId, service, method, payload, std::move(cb),
+               defaultTimeout_);
+  } else {
+    loop_->queueInLoop([this, requestId, service, method, payload,
+                        callback = std::move(cb)]() mutable {
+      callInLoop(requestId, service, method, payload, std::move(callback),
+                 defaultTimeout_);
+    });
+  }
+  return requestId;
+}
+
+uint64_t RpcClient::call(const std::string &service, const std::string &method,
+                         const std::string &payload, RpcCallback cb,
+                         std::chrono::milliseconds timeout) {
   assert(cb != nullptr);
   assert(timeout >= std::chrono::milliseconds{0});
 
+  uint64_t requestId = nextRequestId_.fetch_add(1);
+
   if (loop_->isInLoopThread()) {
-    callInLoop(service, method, payload, std::move(cb), timeout);
+    callInLoop(requestId, service, method, payload, std::move(cb), timeout);
   } else {
-    loop_->queueInLoop([this, service, method, payload,
+    loop_->queueInLoop([this, requestId, service, method, payload,
                         callback = std::move(cb), timeout]() mutable {
-      callInLoop(service, method, payload, std::move(callback), timeout);
+      callInLoop(requestId, service, method, payload, std::move(callback),
+                 timeout);
     });
   }
+  return requestId;
 }
 
 void RpcClient::enableRetry() {
@@ -106,6 +130,22 @@ void RpcClient::setMaxPendingRequests(size_t maxPendingRequests) {
   maxPendingRequests_ = maxPendingRequests;
 }
 
+void RpcClient::setDefaultTimeout(std::chrono::milliseconds defaultTimeout) {
+  assert(defaultTimeout >= std::chrono::milliseconds(0));
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+
+  defaultTimeout_ = defaultTimeout;
+}
+
+void RpcClient::cancel(uint64_t requestId) {
+  if (loop_->isInLoopThread()) {
+    cancelInLoop(requestId);
+  } else {
+    loop_->queueInLoop([this, requestId]() { cancelInLoop(requestId); });
+  }
+}
+
 EventLoop *RpcClient::checkedLoop(EventLoop *loop) {
   assert(loop != nullptr);
   return loop;
@@ -121,7 +161,7 @@ void RpcClient::onConnection(const TcpConnectionPtr &conn) {
     conn_.reset();
     status_ = Status::kDisconnected;
     failAllPendingRequests("connect closed");
-    clearTimedOutRequests();
+    clearIgnoredResponseRequests();
   }
 
   if (connectionCallback_) {
@@ -143,9 +183,10 @@ void RpcClient::onRpcMessage(const TcpConnectionPtr &conn,
 
   auto findRes = pendingRequests_.find(response.getRequestId());
   if (findRes == pendingRequests_.end()) {
-    auto timeoutFindRes = timeoutRequests_.find(response.getRequestId());
-    if (timeoutFindRes != timeoutRequests_.end()) {
-      timeoutRequests_.erase(timeoutFindRes);
+    auto timeoutFindRes =
+        ignoredResponseRequests_.find(response.getRequestId());
+    if (timeoutFindRes != ignoredResponseRequests_.end()) {
+      ignoredResponseRequests_.erase(timeoutFindRes);
       return;
     }
     conn->forceClose();
@@ -167,7 +208,7 @@ void RpcClient::onConnectionError(int errorCode) {
   conn_.reset();
   status_ = Status::kDisconnected;
   failAllPendingRequests("connection error");
-  clearTimedOutRequests();
+  clearIgnoredResponseRequests();
   if (connectionErrorCallback_) {
     connectionErrorCallback_(errorCode);
   }
@@ -205,22 +246,20 @@ void RpcClient::onRequestTimeout(uint64_t requestId) {
 
   auto oneMinuteLater =
       std::chrono::steady_clock::now() + std::chrono::minutes(1);
-  timeoutRequests_[requestId] = oneMinuteLater;
+  ignoredResponseRequests_[requestId] = oneMinuteLater;
 
   RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
                        "rpc request timeout");
   (pendingRequest.callback)(response);
 }
 
-void RpcClient::callInLoop(const std::string &service,
+void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
                            const std::string &method,
                            const std::string &payload, RpcCallback cb,
                            std::chrono::milliseconds timeout) {
   loop_->assertInLoopThread();
   assert(timeout >= std::chrono::milliseconds{0});
   assert(cb != nullptr);
-
-  uint64_t requestId = nextRequestId_++;
 
   do {
     if ((status_ == Status::kConnected) && (conn_ != nullptr) &&
@@ -259,14 +298,15 @@ void RpcClient::callInLoop(const std::string &service,
   cb(response);
 }
 
-void RpcClient::timeoutCron() {
+void RpcClient::clearExpiredIgnoredResponseRequests() {
   loop_->assertInLoopThread();
 
   auto now = std::chrono::steady_clock::now();
 
-  for (auto it = timeoutRequests_.begin(); it != timeoutRequests_.end();) {
+  for (auto it = ignoredResponseRequests_.begin();
+       it != ignoredResponseRequests_.end();) {
     if (it->second <= now) {
-      it = timeoutRequests_.erase(it);
+      it = ignoredResponseRequests_.erase(it);
     } else {
       ++it;
     }
@@ -286,7 +326,30 @@ void RpcClient::clearPendingRequests() {
   }
 }
 
-void RpcClient::clearTimedOutRequests() {
+void RpcClient::clearIgnoredResponseRequests() {
   loop_->assertInLoopThread();
-  timeoutRequests_.clear();
+  ignoredResponseRequests_.clear();
+}
+
+void RpcClient::cancelInLoop(uint64_t requestId) {
+  loop_->assertInLoopThread();
+
+  auto findRes = pendingRequests_.find(requestId);
+  if (findRes == pendingRequests_.end()) {
+    return;
+  }
+
+  auto callback = std::move(findRes->second.callback);
+  if (findRes->second.timerId.has_value()) {
+    loop_->cancel(findRes->second.timerId.value());
+  }
+  pendingRequests_.erase(findRes);
+
+  auto oneMinuteLater =
+      std::chrono::steady_clock::now() + std::chrono::minutes(1);
+  ignoredResponseRequests_[requestId] = oneMinuteLater;
+
+  RpcResponse response{requestId, ResponseResult::kUnsuccess, "",
+                       "rpc request canceled"};
+  callback(response);
 }

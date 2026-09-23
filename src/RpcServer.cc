@@ -79,6 +79,35 @@ bool RpcServer::registerMethod(const std::string &service,
   return false;
 }
 
+bool RpcServer::unregisterMethod(const std::string &service,
+                                 const std::string &method) {
+
+  loop_->assertInLoopThread();
+  assert(status_ == Status::kNotStarted);
+
+  if (service.empty() || method.empty()) {
+    return false;
+  }
+
+  auto serviceItr = handlers_.find(service);
+  if (serviceItr == handlers_.end()) {
+    return false;
+  }
+
+  auto handlerItr = serviceItr->second.find(method);
+  if (handlerItr == serviceItr->second.end()) {
+    return false;
+  }
+
+  serviceItr->second.erase(method);
+
+  if (serviceItr->second.empty()) {
+    handlers_.erase(serviceItr);
+  }
+
+  return true;
+}
+
 void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
                              const std::string &msg) {
   RpcRequest request;
