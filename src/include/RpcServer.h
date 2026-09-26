@@ -21,7 +21,9 @@ public:
 
 public:
   using StopCompleteCallback = std::function<void()>;
-  using RpcHandler = std::function<RpcResult(const std::string &payload)>;
+  using RpcHandler = std::function<RpcResult(const std::string &)>;
+  using RpcReply = std::function<void(RpcResult)>;
+  using RpcAsyncHandler = std::function<void(const std::string &, RpcReply)>;
 
   explicit RpcServer(EventLoop *loop, int listenFd, int threadNum = 0);
 
@@ -33,6 +35,10 @@ public:
   bool registerMethod(const std::string &service, const std::string &method,
                       RpcHandler handler);
 
+  bool registerAsyncMethod(const std::string &service,
+                           const std::string &method,
+                           RpcAsyncHandler asyncHandler);
+
   bool unregisterMethod(const std::string &service, const std::string &method);
 
 private:
@@ -42,6 +48,18 @@ private:
                     ResponseResult responseResult, std::string payload,
                     std::string errorMessage);
 
+  bool isRegistered(const std::string &service, const std::string &method);
+
+  bool isRegisteredInSync(const std::string &service,
+                          const std::string &method);
+
+  bool isRegisteredInAsync(const std::string &service,
+                           const std::string &method);
+
+  void invokeSyncHandler(const TcpConnectionPtr &conn, RpcRequest request);
+
+  void invokeAsyncHandler(const TcpConnectionPtr &conn, RpcRequest request);
+
 private:
   enum class Status { kNotStarted, kRunning, kStopping, kStopped };
 
@@ -50,7 +68,10 @@ private:
   LengthHeaderCodec lengthHeaderCodec_;
   std::unique_ptr<TcpServer> server_;
   std::unordered_map<std::string, std::unordered_map<std::string, RpcHandler>>
-      handlers_;
+      syncHandlers_;
+  std::unordered_map<std::string,
+                     std::unordered_map<std::string, RpcAsyncHandler>>
+      asyncHandlers_;
 
   StopCompleteCallback stopCompleteCallback_;
 };

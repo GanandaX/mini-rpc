@@ -3478,6 +3478,638 @@ void rpc_client_closes_connection_for_malformed_response_test() {
   assert(serverStopped == 1);
 }
 
+void rpc_server_sends_delayed_response_from_async_handler_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int rpcRoundSuccess = 0;
+  int clientDisconnected = 0;
+  bool delayedReplyExecuted = false;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        loop.runAfter(std::chrono::milliseconds(500),
+                      [&delayedReplyExecuted, payload,
+                       reply = std::move(reply)]() mutable {
+                        delayedReplyExecuted = true;
+                        reply(RpcServer::RpcResult{ResponseResult::kSuccess,
+                                                   payload, ""});
+                      });
+      });
+  assert(registered);
+
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    loop.assertInLoopThread();
+                    assert(delayedReplyExecuted);
+
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kSuccess);
+                    assert(response.getPayload() == "hello world");
+
+                    ++rpcRoundSuccess;
+                    client.disconnect();
+                  });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundSuccess == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_ignores_duplicate_reply_from_async_handler_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int rpcRoundSuccess = 0;
+  int clientDisconnected = 0;
+  int asyncHandlerInvoked = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        loop.runAfter(std::chrono::milliseconds(500),
+                      [&asyncHandlerInvoked, payload,
+                       reply = std::move(reply)]() mutable {
+                        ++asyncHandlerInvoked;
+                        reply(RpcServer::RpcResult{ResponseResult::kSuccess,
+                                                   payload, ""});
+
+                        if (asyncHandlerInvoked == 1) {
+                          reply(RpcServer::RpcResult{ResponseResult::kSuccess,
+                                                     "second response", ""});
+                        }
+                      });
+      });
+  assert(registered);
+
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            loop.assertInLoopThread();
+            assert(response.getResponseResult() == ResponseResult::kSuccess);
+            assert(response.getPayload() == "hello world");
+
+            ++rpcRoundSuccess;
+
+            client.call("EchoService", "Echo", "hello world2",
+                        [&](const RpcResponse &response) {
+                          loop.assertInLoopThread();
+                          assert(response.getResponseResult() ==
+                                 ResponseResult::kSuccess);
+                          assert(response.getPayload() == "hello world2");
+
+                          ++rpcRoundSuccess;
+                          client.disconnect();
+                        });
+          });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundSuccess == 2);
+  assert(clientDisconnected == 1);
+  assert(asyncHandlerInvoked == 2);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_returns_error_when_async_handler_throws_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int rpcRoundError = 0;
+  int clientDisconnected = 0;
+  int asyncHandlerInvoked = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        ++asyncHandlerInvoked;
+        throw std::runtime_error("error");
+      });
+  assert(registered);
+
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    loop.assertInLoopThread();
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kUnsuccess);
+                    assert(response.getPayload().empty());
+                    assert(response.getErrorMessage() == "handler exception");
+                    ++rpcRoundError;
+                    client.disconnect();
+                  });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundError == 1);
+  assert(clientDisconnected == 1);
+  assert(asyncHandlerInvoked == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_returns_error_for_invalid_async_handler_result_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int rpcRoundError = 0;
+  int clientDisconnected = 0;
+  int asyncHandlerInvoked = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        ++asyncHandlerInvoked;
+        reply(RpcServer::RpcResult{ResponseResult::kSuccess, "",
+                                   "unexpected error"});
+      });
+  assert(registered);
+
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            loop.assertInLoopThread();
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "invalid handler result");
+            ++rpcRoundError;
+            client.disconnect();
+          });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundError == 1);
+  assert(clientDisconnected == 1);
+  assert(asyncHandlerInvoked == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_sends_response_when_async_reply_is_called_from_another_thread_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int rpcRoundSuccess = 0;
+  int clientDisconnected = 0;
+  std::atomic<int> asyncHandlerInvoked = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+
+  EventLoopThread eventLoopThread;
+  auto threadLoop = eventLoopThread.startLoop();
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        threadLoop->queueInLoop([threadLoop, &asyncHandlerInvoked,
+                                 reply = std::move(reply)]() mutable {
+          threadLoop->assertInLoopThread();
+          ++asyncHandlerInvoked;
+          reply(RpcServer::RpcResult{ResponseResult::kSuccess, "hello world",
+                                     ""});
+        });
+      });
+  assert(registered);
+
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    loop.assertInLoopThread();
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kSuccess);
+                    assert(response.getPayload() == "hello world");
+                    assert(response.getErrorMessage().empty());
+                    ++rpcRoundSuccess;
+                    client.disconnect();
+                  });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundSuccess == 1);
+  assert(clientDisconnected == 1);
+  assert(asyncHandlerInvoked.load() == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_rejects_duplicate_method_registration_across_sync_and_async_handlers_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [](const std::string &payload, RpcServer::RpcReply reply) {});
+  assert(registered);
+
+  registered = server.registerMethod(
+      "EchoService", "Echo",
+      [](const std::string &payload) -> RpcServer::RpcResult {
+        return RpcServer::RpcResult{};
+      });
+  assert(!registered);
+
+  registered = server.registerMethod(
+      "EchoService", "Echo another",
+      [](const std::string &payload) -> RpcServer::RpcResult {
+        return RpcServer::RpcResult{};
+      });
+  assert(registered);
+
+  registered = server.registerAsyncMethod(
+      "EchoService", "Echo another",
+      [](const std::string &payload, RpcServer::RpcReply reply) {});
+  assert(!registered);
+}
+
+void rpc_server_handles_async_reply_after_client_disconnects_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+  std::promise<void> clientDownPromise;
+  auto clientDownFuture = clientDownPromise.get_future();
+
+  int connected = 0;
+  int rpcRoundError = 0;
+  int clientDisconnected = 0;
+  std::atomic<int> asyncReplyInvoked = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  RpcClient client(&loop, serverAddr);
+
+  EventLoopThread eventLoopThread;
+  auto threadLoop = eventLoopThread.startLoop();
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcServer::RpcReply reply) {
+        threadLoop->queueInLoop([&clientDownFuture, threadLoop,
+                                 &asyncReplyInvoked, reply = std::move(reply),
+                                 &loop, &server]() mutable {
+          threadLoop->assertInLoopThread();
+          auto waitForRes =
+              clientDownFuture.wait_for(std::chrono::milliseconds(2000));
+          if (waitForRes != std::future_status::ready) {
+            std::cerr << "wait for client stop timeout" << std::endl;
+            std::abort();
+          }
+
+          ++asyncReplyInvoked;
+          reply(RpcServer::RpcResult{ResponseResult::kSuccess, "hello world",
+                                     ""});
+
+          loop.queueInLoop(
+              [&server]() { server.stop(std::chrono::milliseconds(0)); });
+        });
+
+        client.disconnect();
+      });
+  assert(registered);
+
+  server.start();
+
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    loop.assertInLoopThread();
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kUnsuccess);
+                    assert(response.getPayload().empty());
+                    assert(response.getErrorMessage() == "connect closed");
+                    ++rpcRoundError;
+                  });
+    } else {
+      ++clientDisconnected;
+      clientDownPromise.set_value();
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(rpcRoundError == 1);
+  assert(clientDisconnected == 1);
+  assert(asyncReplyInvoked.load() == 1);
+  assert(serverStopped == 1);
+}
+
 int main() {
   rpc_server_processes_echo_request_test();
   rpc_client_calls_echo_service_test();
@@ -3511,4 +4143,11 @@ int main() {
   rpc_client_allows_calls_from_multiple_non_loop_threads_test();
   rpc_server_closes_connection_for_malformed_request_test();
   rpc_client_closes_connection_for_malformed_response_test();
+  rpc_server_sends_delayed_response_from_async_handler_test();
+  rpc_server_ignores_duplicate_reply_from_async_handler_test();
+  rpc_server_returns_error_when_async_handler_throws_test();
+  rpc_server_returns_error_for_invalid_async_handler_result_test();
+  rpc_server_sends_response_when_async_reply_is_called_from_another_thread_test();
+  rpc_server_rejects_duplicate_method_registration_across_sync_and_async_handlers_test();
+  rpc_server_handles_async_reply_after_client_disconnects_test();
 }

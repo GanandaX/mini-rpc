@@ -26,13 +26,19 @@ rpc_echo_example 会在同一进程中启动 Echo 服务端和客户端，输出
 ## 基本用法
 ### 服务端：
 
-
 ``` C++
-RpcServer server(&loop, serverFd);
-// 该方法用于取消已注册进Server中的方法。该方法和registerMethod都只能在start前调用，且所调用线程为当前的base EventLoop
+// 注册异步回调函数
+// 异步回调函数签名 void(const std::string &, RpcReply)    
+// RpcReply = std::function<void(RpcResult)>;
+// 异步 handler 可以稍后调用 reply；若一直不调用，客户端请求将继续等待，直到超时或连接关闭。
 
-bool unregistered =
-    server.unregisterMethod("EchoService", "Echo");
+RpcServer server(&loop, serverFd);
+
+bool registered = server.registerAsyncMethod(
+      "service", "method",
+      [](const std::string &payload, RpcServer::RpcReply reply) {
+        ...
+      });
 
 server.start();
 ```
@@ -48,6 +54,17 @@ bool registered = server.registerMethod(
     });
 
 server.start();
+```
+<br>
+
+
+``` C++
+RpcServer server(&loop, serverFd);
+// registerMethod、registerAsyncMethod 和 unregisterMethod
+// 只能在 server.start() 前、RpcServer 的 base EventLoop 线程调用。
+
+bool unregistered =
+    server.unregisterMethod("EchoService", "Echo");
 ```
 <br>
 
@@ -148,6 +165,9 @@ client.setMaxPendingRequests(1);
 - 默认超时为永不超时
 - 当超过pending上限后直接调用回调函数并提示请求失败
 - 取消请求后直接调用回调函数并提示请求失败，若请求在取消前已发送给服务端在一定时间内客户端收到响应后直接忽略
+- 异步方法的reply可以从任意线程调用，最终发送回连接所属的EventLoop
+- 同一个reply只有第一次调用有效
+- 异步方法和同步方法不能注册相同的service/method
 
 ## 当前限制
 
