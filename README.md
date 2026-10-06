@@ -28,15 +28,15 @@ rpc_echo_example 会在同一进程中启动 Echo 服务端和客户端，输出
 
 ``` C++
 // 注册异步回调函数
-// 异步回调函数签名 void(const std::string &, RpcReply)    
+// 异步回调函数签名 void(const std::string &, RpcCancellationToken, RpcReply) 
 // RpcReply = std::function<void(RpcResult)>;
-// 异步 handler 可以稍后调用 reply；若一直不调用，客户端请求将继续等待，直到超时或连接关闭。
-
+// 异步 handler 可以稍后调用 reply；若一直不调用，客户端请求将继续等待，直到超时或连接关闭。客户端超时会通知服务端取消，但 handler 是否提前结束由 handler 自己根据 token.isCanceled() 决定
+// 客户端发送取消帧后 server 只取消活动异步请求；handler 可用 token.isCanceled() 查询；服务端将异步请求标记为已取消后，后续调用 reply 不发送响应。
 RpcServer server(&loop, serverFd);
 
 bool registered = server.registerAsyncMethod(
       "service", "method",
-      [](const std::string &payload, RpcServer::RpcReply reply) {
+      [](const std::string &payload, RpcCancellationToken cancellation, RpcServer::RpcReply reply) {
         ...
       });
 
@@ -84,7 +84,6 @@ client.call(
 
 ``` C++
 // 这里两个call，主要的区别在最后是否带一个过期时间。四参数版本使用默认超时，默认值初始为 0ms，表示永不超时；但使用带过期时间的，则过期时间以调用时的为准，当调用时传递的为0则表示该调用永不过期。
-
 client.call("EchoService", "Echo", "hello world",
     [&](const RpcResponse &response) {
     // 根据 response.getResponseResult()
@@ -103,8 +102,7 @@ client.call(
 
 
 ``` C++
-// 该方法用于取消对应请求的调用，若请求仍在等待响应，调用其原 callback 并返回失败响应；找不到 requestId 时静默返回。
-
+// 该方法用于取消对应请求的调用，若请求仍在等待响应，调用其原 callback 并返回失败响应；找不到 requestId 时静默返回。本地回调 "rpc request canceled"，并在请求已发送时向服务端发送 Cancel 帧。
 uint64_t requestId = client.call("EchoService", "Echo", "hello world",
     [&](const RpcResponse &response) {
     // 根据 response.getResponseResult()
@@ -116,14 +114,12 @@ client.cancel(requestId);
 
 ``` C++
 // 该方法用于设置默认过期时间,只能在客户端所属 EventLoop 调用,只能在首次 connect() 前调用。
-
 client.setDefaultTimeout(std::chrono::milliseconds(100));
 ```
 <br>
 
 ``` C++
 // 该方法用于当前RpcClient同时最大的请求承载量，若当前Client的pending 请求数达到上限时直接返回调用错误的回调。默认不限制RpcClient的同时最大请求量。只能在客户端所属 EventLoop 调用,只能在首次 connect() 前调用。
-
 client.setMaxPendingRequests(1);
 ```
 <br>
@@ -137,6 +133,7 @@ client.setMaxPendingRequests(1);
 | :---: | :---: |
 |Request|messageType, requestId, service, method, payload|
 |Response|messageType, requestId, result, payload, errorMessage|
+|Cancel|messageType,requestId|
 
 
 - requestId 由客户端生成，服务端原样返回。
@@ -168,6 +165,8 @@ client.setMaxPendingRequests(1);
 - 异步方法的reply可以从任意线程调用，最终发送回连接所属的EventLoop
 - 同一个reply只有第一次调用有效
 - 异步方法和同步方法不能注册相同的service/method
+- 请求超时时，客户端先发送 Cancel 帧；随后 callback 收到 "rpc request timeout" 失败响应。
+- 服务端收到 Cancel 帧后，会将对应活动异步请求的 RpcCancellationToken 标记为已取消；之后的 reply 不发送响应。
 
 ## 当前限制
 
@@ -175,4 +174,3 @@ client.setMaxPendingRequests(1);
 - 服务端业务线程池
 - 服务发现
 - 断线自动重发
-- 请求取消并不会通知服务端

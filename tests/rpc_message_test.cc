@@ -191,6 +191,49 @@ void rpc_response_encode_rejects_inconsistent_result_test() {
   assert(!errorMessage.empty());
 }
 
+void rpc_cancel_message_encodes_and_decodes_request_id_test() {
+  RpcCancel cancel(123);
+  std::string output;
+  std::string errorMessage;
+
+  assert(cancel.encode(output, errorMessage));
+  assert(!output.empty());
+  assert(errorMessage.empty());
+
+  errorMessage.clear();
+  RpcCancel cancel_decode;
+  assert(cancel_decode.decode(output, errorMessage));
+  assert(errorMessage.empty());
+  assert(cancel_decode.getRequestId() == 123);
+}
+
+void rpc_cancel_message_rejects_malformed_messages_test() {
+  RpcCancel cancel(123);
+  std::string output;
+  std::string errorMessage;
+
+  assert(cancel.encode(output, errorMessage));
+  assert(!output.empty());
+  assert(errorMessage.empty());
+
+  errorMessage.clear();
+  RpcCancel cancelDecodeTruncated;
+  assert(!cancelDecodeTruncated.decode(output.substr(0, output.length() - 1),
+                                        errorMessage));
+  assert(errorMessage == "request id length error");
+
+  errorMessage.clear();
+  RpcCancel cancel_decode_extra_bytes;
+  assert(!cancel_decode_extra_bytes.decode(output.append("123"), errorMessage));
+  assert(errorMessage == "cancel length error");
+
+  errorMessage.clear();
+  RpcCancel cancel_decode_illegal_type;
+  assert(!cancel_decode_illegal_type.decode(output.replace(0, 1, "1"),
+                                            errorMessage));
+  assert(errorMessage == "illegal cancel type");
+}
+
 int main() {
   rpc_request_round_trip_preserves_embedded_nul_test();
   rpc_request_round_trip_preserves_empty_payload_test();
@@ -202,4 +245,6 @@ int main() {
   rpc_request_rejects_empty_message_test();
   rpc_response_rejects_empty_message_test();
   rpc_response_encode_rejects_inconsistent_result_test();
+  rpc_cancel_message_encodes_and_decodes_request_id_test();
+  rpc_cancel_message_rejects_malformed_messages_test();
 }

@@ -1,6 +1,7 @@
 #ifndef MINI_RPC_RPC_SERVER_H
 #define MINI_RPC_RPC_SERVER_H
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -10,6 +11,21 @@
 #include "LengthHeaderCodec.h"
 #include "RpcMessage.h"
 #include "TcpServer.h"
+
+class CancellationRegistry;
+
+class RpcCancellationToken {
+public:
+  bool isCanceled() const;
+
+private:
+  explicit RpcCancellationToken(std::shared_ptr<std::atomic<bool>> canceled);
+
+  std::shared_ptr<std::atomic<bool>> canceled_;
+
+  friend class RpcServer;
+  friend class CancellationRegistry;
+};
 
 class RpcServer {
 public:
@@ -23,7 +39,9 @@ public:
   using StopCompleteCallback = std::function<void()>;
   using RpcHandler = std::function<RpcResult(const std::string &)>;
   using RpcReply = std::function<void(RpcResult)>;
-  using RpcAsyncHandler = std::function<void(const std::string &, RpcReply)>;
+  using RpcAsyncHandler =
+      std::function<void(const std::string &payload,
+                         RpcCancellationToken cancellation, RpcReply reply)>;
 
   explicit RpcServer(EventLoop *loop, int listenFd, int threadNum = 0);
 
@@ -60,6 +78,8 @@ private:
 
   void invokeAsyncHandler(const TcpConnectionPtr &conn, RpcRequest request);
 
+  void cancelAsync(const TcpConnectionPtr &conn, uint64_t requestId);
+
 private:
   enum class Status { kNotStarted, kRunning, kStopping, kStopped };
 
@@ -72,6 +92,8 @@ private:
   std::unordered_map<std::string,
                      std::unordered_map<std::string, RpcAsyncHandler>>
       asyncHandlers_;
+
+  std::shared_ptr<CancellationRegistry> cancellationRegistry_;
 
   StopCompleteCallback stopCompleteCallback_;
 };

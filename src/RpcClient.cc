@@ -248,6 +248,8 @@ void RpcClient::onRequestTimeout(uint64_t requestId) {
       std::chrono::steady_clock::now() + std::chrono::minutes(1);
   ignoredResponseRequests_[requestId] = oneMinuteLater;
 
+  sendCancel(requestId);
+
   RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
                        "rpc request timeout");
   (pendingRequest.callback)(response);
@@ -264,7 +266,6 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
   do {
     if ((status_ == Status::kConnected) && (conn_ != nullptr) &&
         (conn_->connected())) {
-
       if (maxPendingRequests_.has_value() &&
           pendingRequests_.size() >= maxPendingRequests_) {
         RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
@@ -349,7 +350,27 @@ void RpcClient::cancelInLoop(uint64_t requestId) {
       std::chrono::steady_clock::now() + std::chrono::minutes(1);
   ignoredResponseRequests_[requestId] = oneMinuteLater;
 
+  sendCancel(requestId);
+
   RpcResponse response{requestId, ResponseResult::kUnsuccess, "",
                        "rpc request canceled"};
   callback(response);
+}
+
+void RpcClient::sendCancel(uint64_t requestId) {
+  loop_->assertInLoopThread();
+
+  if (!conn_ || !conn_->connected()) {
+    return;
+  }
+
+  RpcCancel cancel(requestId);
+  std::string output;
+  std::string errorMsg;
+  bool res = cancel.encode(output, errorMsg);
+  if (!res || !errorMsg.empty()) {
+    return;
+  }
+
+  codec_.send(conn_, output.data(), output.length());
 }

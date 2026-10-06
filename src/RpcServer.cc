@@ -1,9 +1,31 @@
 #include "RpcServer.h"
 #include <assert.h>
 #include <atomic>
+#include <map>
+#include <mutex>
+#include <optional>
+
+class CancellationRegistry {
+public:
+  explicit CancellationRegistry() = default;
+
+  std::optional<RpcCancellationToken> take(const TcpConnectionPtr &ptr,
+                                           uint64_t requestId);
+  bool registerToken(const TcpConnectionPtr &ptr, uint64_t requestId,
+                     RpcCancellationToken token);
+
+  void cancel(const TcpConnectionPtr &conn, uint64_t requestId);
+
+  void clearConnectionCancellations(const TcpConnectionPtr &conn);
+
+private:
+  std::mutex mutex_;
+  std::map<std::pair<TcpConnectionPtr, uint64_t>, RpcCancellationToken>
+      cancellations;
+  friend class RpcServer;
+};
 
 namespace {
-
 void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
                     ResponseResult responseResult, std::string payload,
                     std::string errorMessage) {
@@ -23,6 +45,70 @@ void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
 }
 } // namespace
 
+bool RpcCancellationToken::isCanceled() const { return canceled_->load(); }
+
+RpcCancellationToken::RpcCancellationToken(
+    std::shared_ptr<std::atomic<bool>> canceled) {
+  canceled_ = std::move(canceled);
+}
+
+std::optional<RpcCancellationToken>
+CancellationRegistry::take(const TcpConnectionPtr &ptr, uint64_t requestId) {
+  std::lock_guard<std::mutex> locker(mutex_);
+
+  std::optional<RpcCancellationToken> value;
+
+  auto findRes = cancellations.find({ptr, requestId});
+  if (findRes == cancellations.end()) {
+    return value;
+  }
+
+  value.emplace(findRes->second);
+  cancellations.erase(findRes);
+
+  return value;
+}
+
+bool CancellationRegistry::registerToken(const TcpConnectionPtr &ptr,
+                                         uint64_t requestId,
+                                         RpcCancellationToken token) {
+  std::lock_guard<std::mutex> locker(mutex_);
+
+  auto findRes = cancellations.find({ptr, requestId});
+  if (findRes != cancellations.end()) {
+    return false;
+  }
+
+  cancellations.emplace(std::make_pair(ptr, requestId), std::move(token));
+  return true;
+}
+
+void CancellationRegistry::cancel(const TcpConnectionPtr &conn,
+                                  uint64_t requestId) {
+  std::lock_guard<std::mutex> locker(mutex_);
+
+  auto findRes = cancellations.find({conn, requestId});
+  if (findRes == cancellations.end()) {
+    return;
+  }
+
+  findRes->second.canceled_->store(true);
+  cancellations.erase(findRes);
+}
+
+void CancellationRegistry::clearConnectionCancellations(
+    const TcpConnectionPtr &conn) {
+  std::lock_guard<std::mutex> locker(mutex_);
+  for (auto it = cancellations.begin(); it != cancellations.end();) {
+    if (it->first.first == conn) {
+      it->second.canceled_->store(true);
+      it = cancellations.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
     : loop_(loop), status_(Status::kNotStarted) {
   assert(loop != nullptr);
@@ -31,6 +117,7 @@ RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
   loop_->assertInLoopThread();
 
   server_ = std::make_unique<TcpServer>(loop, listenFd, threadNum);
+  cancellationRegistry_ = std::make_shared<CancellationRegistry>();
 
   lengthHeaderCodec_.setMessageCallback(std::bind(&RpcServer::onRpcMessage,
                                                   this, std::placeholders::_1,
@@ -38,8 +125,17 @@ RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
   server_->setMessageCallback(
       std::bind(&LengthHeaderCodec::onMessage, &lengthHeaderCodec_,
                 std::placeholders::_1, std::placeholders::_2));
+
+  auto registry = cancellationRegistry_;
+  server_->setConnectionCallback([registry](const TcpConnectionPtr &conn) {
+    if (!conn->connected()) {
+      registry->clearConnectionCancellations(conn);
+    }
+  });
+
   server_->setPeerHalfCloseCallback(
       [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+
   server_->setStopCompleteCallback([this]() {
     status_ = Status::kStopped;
     if (stopCompleteCallback_) {
@@ -190,6 +286,25 @@ bool RpcServer::unregisterMethod(const std::string &service,
 
 void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
                              const std::string &msg) {
+  if (msg.empty()) {
+    conn->forceClose();
+    return;
+  }
+
+  if (msg[0] == RpcMessageType::kCancel) {
+    RpcCancel cancel;
+    std::string errorMessage;
+
+    bool res = cancel.decode(msg, errorMessage);
+    if (!res || !errorMessage.empty()) {
+      conn->forceClose();
+      return;
+    }
+
+    cancelAsync(conn, cancel.getRequestId());
+    return;
+  }
+
   RpcRequest request;
   std::string errorMessage;
   bool res = request.decode(msg, errorMessage);
@@ -302,10 +417,23 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
   std::weak_ptr<TcpConnection> weakPtr = conn;
   uint64_t requestId = request.getRequestId();
 
+  RpcCancellationToken cancellationToken(
+      std::make_shared<std::atomic<bool>>(false));
+  bool res =
+      cancellationRegistry_->registerToken(conn, requestId, cancellationToken);
+  if (!res) {
+    conn->forceClose();
+    return;
+  }
+
+  std::weak_ptr<CancellationRegistry> weakCancellationRegistryPtr =
+      cancellationRegistry_;
+
   std::shared_ptr<std::atomic<bool>> repliedFlag =
       std::make_shared<std::atomic<bool>>(false);
   std::function<void(RpcResult)> reply =
-      [weakPtr, requestId, repliedFlag](RpcResult rpcResult) -> void {
+      [weakPtr, requestId, repliedFlag,
+       weakCancellationRegistryPtr](RpcResult rpcResult) -> void {
     if (repliedFlag->exchange(true)) {
       return;
     }
@@ -321,29 +449,41 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
          !rpcResult.errorMessage.empty()) ||
         (rpcResult.result != ResponseResult::kSuccess &&
          rpcResult.result != ResponseResult::kUnsuccess)) {
-
-      conn->loop()->queueInLoop([conn, requestId]() {
-        sendFramedData(conn, requestId, ResponseResult::kUnsuccess, "",
-                       "invalid handler result");
-      });
-      return;
+      rpcResult = {ResponseResult::kUnsuccess, "", "invalid handler result"};
     }
 
-    conn->loop()->queueInLoop(
-        [conn, requestId, rpcResult = std::move(rpcResult)]() mutable {
-          sendFramedData(conn, requestId, rpcResult.result,
-                         std::move(rpcResult.payload),
-                         std::move(rpcResult.errorMessage));
-        });
+    conn->loop()->queueInLoop([conn, requestId,
+                               rpcResult = std::move(rpcResult),
+                               weakCancellationRegistryPtr]() mutable {
+      auto registry = weakCancellationRegistryPtr.lock();
+      if (!registry) {
+        return;
+      }
+
+      auto token = registry->take(conn, requestId);
+
+      if (!token.has_value() || token->isCanceled()) {
+        return;
+      }
+
+      sendFramedData(conn, requestId, rpcResult.result,
+                     std::move(rpcResult.payload),
+                     std::move(rpcResult.errorMessage));
+    });
   };
 
-  conn->loop()->runInLoop([request, handler, reply]() {
-    try {
-      handler(request.getPayload(), reply);
-    } catch (...) {
-      reply(RpcServer::RpcResult{ResponseResult::kUnsuccess, "",
-                                 "handler exception"});
-      return;
-    }
-  });
+  conn->loop()->runInLoop(
+      [request, handler, reply, token = cancellationToken]() {
+        try {
+          handler(request.getPayload(), token, reply);
+        } catch (...) {
+          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess, "",
+                                     "handler exception"});
+          return;
+        }
+      });
+}
+
+void RpcServer::cancelAsync(const TcpConnectionPtr &conn, uint64_t requestId) {
+  cancellationRegistry_->cancel(conn, requestId);
 }

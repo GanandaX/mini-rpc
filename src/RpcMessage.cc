@@ -332,3 +332,70 @@ ResponseResult RpcResponse::getResponseResult() const {
 std::string RpcResponse::getPayload() const { return payload_; }
 
 std::string RpcResponse::getErrorMessage() const { return errorMessage_; }
+
+RpcCancel::RpcCancel() : requestId_(0) {}
+
+RpcCancel::RpcCancel(uint64_t requestId) : requestId_(requestId) {}
+
+bool RpcCancel::encode(std::string &output, std::string &errorMessage) const {
+  constexpr size_t kCancelMessageLen = sizeof(uint8_t) + sizeof(uint64_t);
+
+  output.resize(kCancelMessageLen);
+  char *data = output.data();
+
+  size_t index = 0;
+  uint64_t requestIdNet = requestId_;
+
+  requestIdNet = hton(requestIdNet);
+
+  uint8_t type = RpcMessageType::kCancel;
+  ::memcpy(data + index, &type, 1);
+  index += 1;
+  ::memcpy(data + index, &requestIdNet, sizeof(requestIdNet));
+  index += sizeof(requestIdNet);
+
+  return true;
+}
+
+bool RpcCancel::decode(std::string message, std::string &errorMsg) {
+  size_t leftLen = message.length();
+
+  if (leftLen <= 0) {
+    errorMsg.append("length <= 0");
+    return false;
+  }
+
+  size_t index = 0;
+
+  char *data = message.data();
+  uint8_t type = data[index];
+  --leftLen;
+  ++index;
+
+  if (type != RpcMessageType::kCancel) {
+    errorMsg.append("illegal cancel type");
+    return false;
+  }
+
+  uint64_t requestIdNet;
+  uint64_t requestIdHost;
+
+  if (leftLen < sizeof(requestIdNet)) {
+    errorMsg.append("request id length error");
+    return false;
+  }
+  ::memcpy(&requestIdNet, data + index, sizeof(requestIdNet));
+  requestIdHost = ntoh(requestIdNet);
+  leftLen -= sizeof(requestIdNet);
+  index += sizeof(requestIdNet);
+
+  if (leftLen > 0) {
+    errorMsg.append("cancel length error");
+    return false;
+  }
+
+  requestId_ = requestIdHost;
+  return true;
+}
+
+uint64_t RpcCancel::getRequestId() const { return requestId_; }

@@ -69,6 +69,8 @@ private:
 
   void cancelInLoop(uint64_t requestId);
 
+  void sendCancel(uint64_t requestId);
+
 private:
   enum class Status { kDisconnected, kConnecting, kDisconnecting, kConnected };
 

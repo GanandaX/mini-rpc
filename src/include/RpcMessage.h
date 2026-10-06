@@ -8,7 +8,7 @@
 #include <string.h>
 #include <string>
 
-enum RpcMessageType { kRequest, kResponse };
+enum RpcMessageType { kRequest, kResponse, kCancel };
 enum ResponseResult { kSuccess, kUnsuccess };
 
 class RpcRequest {
@@ -51,6 +51,20 @@ private:
   ResponseResult responseResult_;
   std::string payload_;
   std::string errorMessage_;
+};
+
+class RpcCancel {
+public:
+  explicit RpcCancel();
+  explicit RpcCancel(uint64_t requestId);
+
+  bool encode(std::string &output, std::string &errorMessage) const;
+  bool decode(std::string message, std::string &errorMessage);
+
+  uint64_t getRequestId() const;
+
+private:
+  uint64_t requestId_;
 };
 
 #endif
