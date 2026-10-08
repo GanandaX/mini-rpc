@@ -59,6 +59,10 @@ public:
 
   bool unregisterMethod(const std::string &service, const std::string &method);
 
+  void setMaxActiveRequests(size_t maxActiveRequests);
+
+  void setMaxActiveRequestsPerConnection(size_t maxActiveRequests);
+
 private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 

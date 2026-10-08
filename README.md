@@ -27,6 +27,19 @@ rpc_echo_example 会在同一进程中启动 Echo 服务端和客户端，输出
 ### 服务端：
 
 ``` C++
+// 两者默认不限制，只能在 server.start() 前、RpcServer base EventLoop 线程调用；
+// 达到任一上限时，服务端返回失败响应："server request limit reached"
+// 只统计已登记 cancellation token 的异步请求；正常 reply、收到 RpcCancel、连接关闭都会释放名额。
+
+// 全局活动异步请求上限；
+setMaxActiveRequests(size_t)： 
+// 单条 TCP 连接的活动异步请求上限；
+setMaxActiveRequestsPerConnection(size_t)：
+```
+<br>
+
+
+``` C++
 // 注册异步回调函数
 // 异步回调函数签名 void(const std::string &, RpcCancellationToken, RpcReply) 
 // RpcReply = std::function<void(RpcResult)>;
