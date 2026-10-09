@@ -8,8 +8,21 @@
 #include <string.h>
 #include <string>
 
+constexpr uint16_t kRpcProtocolVersion = 1;
+
+constexpr uint16_t VERSION_LEN = sizeof(uint16_t);
+constexpr uint16_t REQUEST_TYPE_LEN = sizeof(uint8_t);
+constexpr uint16_t REQUEST_ID_LEN = sizeof(uint64_t);
+constexpr uint16_t SERVICE_NAME_LEN = sizeof(uint32_t);
+constexpr uint16_t METHOD_NAME_LEN = sizeof(uint32_t);
+constexpr uint16_t RESPONSE_RESULT_LEN = sizeof(uint8_t);
+constexpr uint16_t PALOAD_MESSAGE_LEN = sizeof(uint32_t);
+constexpr uint16_t ERROR_MESSAGE_LEN = sizeof(uint32_t);
+
 enum RpcMessageType { kRequest, kResponse, kCancel };
 enum ResponseResult { kSuccess, kUnsuccess };
+
+bool decodeHead(const std::string &msg, RpcMessageType &messageType);
 
 class RpcRequest {
 public:

@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <iomanip>
 #include <iostream>
-
+#include <cstring>
 #include "RpcMessage.h"
 
 void rpc_request_round_trip_preserves_embedded_nul_test() {
@@ -219,7 +219,7 @@ void rpc_cancel_message_rejects_malformed_messages_test() {
   errorMessage.clear();
   RpcCancel cancelDecodeTruncated;
   assert(!cancelDecodeTruncated.decode(output.substr(0, output.length() - 1),
-                                        errorMessage));
+                                       errorMessage));
   assert(errorMessage == "request id length error");
 
   errorMessage.clear();
@@ -229,9 +229,84 @@ void rpc_cancel_message_rejects_malformed_messages_test() {
 
   errorMessage.clear();
   RpcCancel cancel_decode_illegal_type;
-  assert(!cancel_decode_illegal_type.decode(output.replace(0, 1, "1"),
+  assert(!cancel_decode_illegal_type.decode(output.replace(VERSION_LEN, 1, "1"),
                                             errorMessage));
   assert(errorMessage == "illegal cancel type");
+}
+
+void rpc_request_rejects_unsupported_protocol_version_test() {
+  RpcRequest request(0x112233, "EchoService", "echo", "");
+  std::string output;
+  std::string errorMessage;
+  assert(true == request.encode(output, errorMessage));
+  assert(errorMessage.empty());
+
+  RpcRequest requestResolve;
+  std::string errorMsg;
+  bool res = requestResolve.decode(output, errorMsg);
+
+  assert(res == true);
+  assert(errorMsg.empty());
+  assert(requestResolve.getRequestId() == 0x112233);
+  assert(requestResolve.getService() == "EchoService");
+  assert(requestResolve.getMethod() == "echo");
+  assert(requestResolve.getPayload().empty());
+
+  errorMsg.clear();
+  uint16_t unsupportedVersion = htons(kRpcProtocolVersion + 1);
+  std::memcpy(output.data(), &unsupportedVersion, sizeof(unsupportedVersion));
+  res = requestResolve.decode(output, errorMsg);
+  assert(res == false);
+  assert(errorMsg == "unsupported rpc protocol version");
+}
+
+void rpc_response_rejects_unsupported_protocol_version_test() {
+  std::string expected("hello\0 world", 12);
+  RpcResponse response(0x112233, ResponseResult::kSuccess, expected, "");
+  std::string output;
+  std::string errorMessage;
+  assert(true == response.encode(output, errorMessage));
+  assert(errorMessage.empty());
+
+  RpcResponse responseResolve;
+  std::string errorMsg;
+  bool res = responseResolve.decode(output, errorMsg);
+
+  assert(res == true);
+  assert(errorMsg.empty());
+  assert(responseResolve.getRequestId() == 0x112233);
+  assert(responseResolve.getResponseResult() == ResponseResult::kSuccess);
+  assert(responseResolve.getPayload() == expected);
+  assert(responseResolve.getPayload().size() == 12);
+  assert(responseResolve.getErrorMessage().empty());
+
+  errorMsg.clear();
+  uint16_t unsupportedVersion = htons(kRpcProtocolVersion + 1);
+  std::memcpy(output.data(), &unsupportedVersion, sizeof(unsupportedVersion));
+  assert(!responseResolve.decode(output, errorMsg));
+  assert(errorMsg == "unsupported rpc protocol version");
+}
+
+void rpc_cancel_rejects_unsupported_protocol_version_test() {
+  RpcCancel cancel(123);
+  std::string output;
+  std::string errorMessage;
+
+  assert(cancel.encode(output, errorMessage));
+  assert(!output.empty());
+  assert(errorMessage.empty());
+
+  errorMessage.clear();
+  RpcCancel cancel_decode;
+  assert(cancel_decode.decode(output, errorMessage));
+  assert(errorMessage.empty());
+  assert(cancel_decode.getRequestId() == 123);
+
+  errorMessage.clear();
+  uint16_t unsupportedVersion = htons(kRpcProtocolVersion + 1);
+  std::memcpy(output.data(), &unsupportedVersion, sizeof(unsupportedVersion));
+  assert(!cancel_decode.decode(output, errorMessage));
+  assert(errorMessage == "unsupported rpc protocol version");
 }
 
 int main() {
@@ -247,4 +322,7 @@ int main() {
   rpc_response_encode_rejects_inconsistent_result_test();
   rpc_cancel_message_encodes_and_decodes_request_id_test();
   rpc_cancel_message_rejects_malformed_messages_test();
+  rpc_request_rejects_unsupported_protocol_version_test();
+  rpc_response_rejects_unsupported_protocol_version_test();
+  rpc_cancel_rejects_unsupported_protocol_version_test();
 }

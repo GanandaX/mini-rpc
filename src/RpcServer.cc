@@ -372,7 +372,14 @@ void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
     return;
   }
 
-  if (msg[0] == RpcMessageType::kCancel) {
+  RpcMessageType messageType;
+  bool decodeRes = decodeHead(msg, messageType);
+  if (!decodeRes) {
+    conn->forceClose();
+    return;
+  }
+
+  if (messageType == RpcMessageType::kCancel) {
     RpcCancel cancel;
     std::string errorMessage;
 
@@ -383,6 +390,11 @@ void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
     }
 
     cancelAsync(conn, cancel.getRequestId());
+    return;
+  }
+
+  if (messageType != RpcMessageType::kRequest) {
+    conn->forceClose();
     return;
   }
 

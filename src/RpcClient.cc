@@ -173,6 +173,13 @@ void RpcClient::onRpcMessage(const TcpConnectionPtr &conn,
                              const std::string &rpcBytes) {
   loop_->assertInLoopThread();
 
+  RpcMessageType messageType;
+  if (!decodeHead(rpcBytes, messageType) ||
+      messageType != RpcMessageType::kResponse) {
+    conn->forceClose();
+    return;
+  }
+
   RpcResponse response;
   std::string errorMsg;
   bool res = response.decode(rpcBytes, errorMsg);

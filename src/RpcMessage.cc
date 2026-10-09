@@ -62,6 +62,40 @@ bool loadString(size_t &index, size_t &leftLen, char *data,
 
 } // namespace
 
+bool decodeHead(const std::string &msg, RpcMessageType &messageType) {
+
+  size_t index = 0;
+  uint16_t version;
+  uint8_t type;
+
+  uint64_t headSize = sizeof(version) + sizeof(type);
+
+  if (msg.size() < headSize) {
+    return false;
+  }
+
+  const char *data = msg.data();
+  ::memcpy(&version, data + index, sizeof(version));
+  index += sizeof(version);
+  ::memcpy(&type, data + index, sizeof(type));
+  index += sizeof(type);
+
+  version = ntoh(version);
+  type = ntoh(type);
+
+  if (version != kRpcProtocolVersion) {
+    return false;
+  }
+
+  if (type != RpcMessageType::kRequest && type != RpcMessageType::kResponse &&
+      type != RpcMessageType::kCancel) {
+    return false;
+  }
+
+  messageType = static_cast<RpcMessageType>(type);
+  return true;
+}
+
 RpcRequest::RpcRequest() : requestId_(0), service_(), method_(), payload_() {}
 
 RpcRequest::RpcRequest(uint64_t requestId, std::string service,
@@ -76,25 +110,32 @@ bool RpcRequest::encode(std::string &output, std::string &errorMessage) const {
     return false;
   }
 
-  size_t msgLen = 21 + service_.length() + method_.length() + payload_.length();
+  size_t msgLen = VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN +
+                  SERVICE_NAME_LEN + METHOD_NAME_LEN + PALOAD_MESSAGE_LEN +
+                  service_.length() + method_.length() + payload_.length();
 
   output.resize(msgLen);
   char *data = output.data();
 
   size_t index = 0;
+  uint16_t versionNet = kRpcProtocolVersion;
   uint64_t requestIdNet = requestId_;
   uint32_t serviceLenNet = service_.length();
   uint32_t methodLenNet = method_.length();
   uint32_t payloadLenNet = payload_.length();
 
+  versionNet = hton(versionNet);
   requestIdNet = hton(requestIdNet);
   serviceLenNet = hton(serviceLenNet);
   methodLenNet = hton(methodLenNet);
   payloadLenNet = hton(payloadLenNet);
 
   uint8_t type = RpcMessageType::kRequest;
-  ::memcpy(data + index, &type, 1);
-  index += 1;
+
+  ::memcpy(data + index, &versionNet, sizeof(versionNet));
+  index += sizeof(versionNet);
+  ::memcpy(data + index, &type, sizeof(type));
+  index += sizeof(type);
   ::memcpy(data + index, &requestIdNet, sizeof(requestIdNet));
   index += sizeof(requestIdNet);
   ::memcpy(data + index, &serviceLenNet, sizeof(serviceLenNet));
@@ -124,7 +165,29 @@ bool RpcRequest::decode(std::string requestMsg, std::string &errorMsg) {
   size_t index = 0;
 
   char *data = requestMsg.data();
-  uint8_t type = data[index];
+
+  uint16_t versionNet;
+  uint16_t versionHost;
+  if (leftLen < sizeof(versionNet)) {
+    errorMsg.append("version length error");
+    return false;
+  }
+  ::memcpy(&versionNet, data + index, sizeof(versionNet));
+  versionHost = ntoh(versionNet);
+  leftLen -= sizeof(versionNet);
+  index += sizeof(versionNet);
+
+  if (versionHost != kRpcProtocolVersion) {
+    errorMsg.append("unsupported rpc protocol version");
+    return false;
+  }
+
+  uint8_t type;
+  if (leftLen < sizeof(type)) {
+    errorMsg.append("type length error");
+    return false;
+  }
+  type = data[index];
   --leftLen;
   ++index;
 
@@ -211,24 +274,31 @@ bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
     return false;
   }
 
-  size_t msgLen = 18 + payload_.length() + errorMessage_.length();
+  size_t msgLen = VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN +
+                  RESPONSE_RESULT_LEN + PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN +
+                  payload_.length() + errorMessage_.length();
 
   output.resize(msgLen);
   char *data = output.data();
 
   size_t index = 0;
+  uint16_t versionNet = kRpcProtocolVersion;
   uint64_t requestIdNet = requestId_;
   uint32_t payloadLenNet = payload_.length();
   uint32_t errorMessageLenNet = errorMessage_.length();
 
+  versionNet = hton(versionNet);
   requestIdNet = hton(requestIdNet);
   payloadLenNet = hton(payloadLenNet);
   errorMessageLenNet = hton(errorMessageLenNet);
 
   uint8_t type = RpcMessageType::kResponse;
   uint8_t responseResult = responseResult_;
-  ::memcpy(data + index, &type, 1);
-  index += 1;
+
+  ::memcpy(data + index, &versionNet, sizeof(versionNet));
+  index += sizeof(versionNet);
+  ::memcpy(data + index, &type, sizeof(type));
+  index += sizeof(type);
   ::memcpy(data + index, &requestIdNet, sizeof(requestIdNet));
   index += sizeof(requestIdNet);
   ::memcpy(data + index, &responseResult, sizeof(responseResult));
@@ -256,7 +326,29 @@ bool RpcResponse::decode(std::string requestMsg, std::string &errorMsg) {
   size_t index = 0;
 
   char *data = requestMsg.data();
-  uint8_t type = data[index];
+
+  uint16_t versionNet;
+  uint16_t versionHost;
+  if (leftLen < sizeof(versionNet)) {
+    errorMsg.append("version length error");
+    return false;
+  }
+  ::memcpy(&versionNet, data + index, sizeof(versionNet));
+  versionHost = ntoh(versionNet);
+  leftLen -= sizeof(versionNet);
+  index += sizeof(versionNet);
+
+  if (versionHost != kRpcProtocolVersion) {
+    errorMsg.append("unsupported rpc protocol version");
+    return false;
+  }
+
+  uint8_t type;
+  if (leftLen < sizeof(type)) {
+    errorMsg.append("type length error");
+    return false;
+  }
+  type = data[index];
   --leftLen;
   ++index;
 
@@ -338,19 +430,25 @@ RpcCancel::RpcCancel() : requestId_(0) {}
 RpcCancel::RpcCancel(uint64_t requestId) : requestId_(requestId) {}
 
 bool RpcCancel::encode(std::string &output, std::string &errorMessage) const {
-  constexpr size_t kCancelMessageLen = sizeof(uint8_t) + sizeof(uint64_t);
+  constexpr size_t kCancelMessageLen =
+      VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN;
 
   output.resize(kCancelMessageLen);
   char *data = output.data();
 
   size_t index = 0;
+  uint16_t versionNet = kRpcProtocolVersion;
   uint64_t requestIdNet = requestId_;
 
+  versionNet = hton(versionNet);
   requestIdNet = hton(requestIdNet);
 
   uint8_t type = RpcMessageType::kCancel;
-  ::memcpy(data + index, &type, 1);
-  index += 1;
+
+  ::memcpy(data + index, &versionNet, sizeof(versionNet));
+  index += sizeof(versionNet);
+  ::memcpy(data + index, &type, sizeof(type));
+  index += sizeof(type);
   ::memcpy(data + index, &requestIdNet, sizeof(requestIdNet));
   index += sizeof(requestIdNet);
 
@@ -368,7 +466,29 @@ bool RpcCancel::decode(std::string message, std::string &errorMsg) {
   size_t index = 0;
 
   char *data = message.data();
-  uint8_t type = data[index];
+
+  uint16_t versionNet;
+  uint16_t versionHost;
+  if (leftLen < sizeof(versionNet)) {
+    errorMsg.append("version length error");
+    return false;
+  }
+  ::memcpy(&versionNet, data + index, sizeof(versionNet));
+  versionHost = ntoh(versionNet);
+  leftLen -= sizeof(versionNet);
+  index += sizeof(versionNet);
+
+  if (versionHost != kRpcProtocolVersion) {
+    errorMsg.append("unsupported rpc protocol version");
+    return false;
+  }
+
+  uint8_t type;
+  if (leftLen < sizeof(type)) {
+    errorMsg.append("type length error");
+    return false;
+  }
+  type = data[index];
   --leftLen;
   ++index;
 

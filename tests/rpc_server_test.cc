@@ -1551,7 +1551,14 @@ void rpc_client_ignores_late_response_after_request_timeout_test() {
       return;
     }
 
-    if (msg[0] == RpcMessageType::kCancel) {
+    RpcMessageType messageType;
+    bool decodeRes = decodeHead(msg, messageType);
+    if (!decodeRes) {
+      conn->forceClose();
+      return;
+    }
+
+    if (messageType == RpcMessageType::kCancel) {
       return;
     }
 
@@ -2268,7 +2275,14 @@ void rpc_client_releases_pending_capacity_after_request_timeout_test() {
           return;
         }
 
-        if (msg[0] == RpcMessageType::kCancel) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kCancel) {
           return;
         }
 
@@ -2421,7 +2435,14 @@ void rpc_client_uses_default_timeout_and_allows_explicit_zero_override_test() {
           return;
         }
 
-        if (msg[0] == RpcMessageType::kCancel) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kCancel) {
           return;
         }
 
@@ -2567,7 +2588,14 @@ void rpc_client_ignores_late_response_after_request_cancellation_test() {
           std::abort();
         }
 
-        if (msg[0] == RpcMessageType::kCancel) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kCancel) {
           RpcCancel cancel;
           std::string errorMessage;
           assert(cancel.decode(msg, errorMessage));
@@ -3053,7 +3081,14 @@ void rpc_client_releases_pending_capacity_after_request_cancellation_test() {
           std::abort();
         }
 
-        if (msg[0] == RpcMessageType::kCancel) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kCancel) {
           RpcCancel cancel;
           std::string errorMessage;
           assert(cancel.decode(msg, errorMessage));
@@ -4325,7 +4360,14 @@ void rpc_client_sends_cancel_message_for_pending_request_test() {
           std::abort();
         }
 
-        if (msg[0] == RpcMessageType::kRequest) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kRequest) {
           assert(!serverCancelReceived);
           ++serverRequestReceived;
 
@@ -4339,7 +4381,7 @@ void rpc_client_sends_cancel_message_for_pending_request_test() {
           if (serverRequestReceived == 1) {
             serverRequestId = request.getRequestId();
           }
-        } else if (msg[0] == RpcMessageType::kCancel) {
+        } else if (messageType == RpcMessageType::kCancel) {
           assert(serverRequestReceived == 1);
           ++serverCancelReceived;
 
@@ -5297,7 +5339,14 @@ void rpc_client_does_not_send_cancel_after_response_before_timeout_test() {
           std::abort();
         }
 
-        if (msg[0] == RpcMessageType::kRequest) {
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+
+        if (messageType == RpcMessageType::kRequest) {
           ++serverRequestReceived;
 
           RpcRequest request;
@@ -5730,9 +5779,7 @@ void rpc_server_releases_active_request_capacity_after_cancellation_test() {
   bool registered = server.registerAsyncMethod(
       "EchoService", "Echo",
       [&](const std::string &payload, RpcCancellationToken cancellation,
-          RpcServer::RpcReply reply) {
-        ++serverHandled;
-      });
+          RpcServer::RpcReply reply) { ++serverHandled; });
   assert(registered);
 
   registered = server.registerAsyncMethod(
@@ -5804,6 +5851,411 @@ void rpc_server_releases_active_request_capacity_after_cancellation_test() {
   assert(serverStopped == 1);
 }
 
+void rpc_server_closes_connection_for_unsupported_protocol_version_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> serverStopCompletePromise;
+  auto serverStopCompleteFuture = serverStopCompletePromise.get_future();
+
+  int connected = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  RpcServer server(&loop, serverFd);
+  TcpClient client(&loop, serverAddr);
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      serverStopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  client.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+
+      std::string output;
+      std::string errorMessage;
+      RpcRequest request(1, "service", "method", "123");
+      bool res = request.encode(output, errorMessage);
+      if (!res || !errorMessage.empty()) {
+        std::cerr << "request encoding error" << std::endl;
+        std::abort();
+      }
+
+      uint16_t versionNet = 2;
+      versionNet = htons(versionNet);
+      ::memcpy(output.data(), &versionNet, sizeof(versionNet));
+      codec.send(conn, output.data(), output.size());
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      serverStopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for server stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_client_closes_connection_for_unsupported_protocol_version_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int requestCallbackCount = 0;
+  int serverRequestReceived = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback(
+      [&](const TcpConnectionPtr &conn, const std::string &msg) {
+        if (msg.empty()) {
+          std::abort();
+        }
+
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+        assert(messageType == RpcMessageType::kRequest);
+
+        ++serverRequestReceived;
+
+        RpcRequest request;
+        std::string errorMsg;
+        std::string output;
+        bool res = request.decode(msg, errorMsg);
+        if (!res || !errorMsg.empty()) {
+          std::abort();
+        }
+
+        RpcResponse response(request.getRequestId(), ResponseResult::kSuccess,
+                             request.getPayload(), "");
+        output.clear();
+        errorMsg.clear();
+        res = response.encode(output, errorMsg);
+        if (!res || !errorMsg.empty()) {
+          std::abort();
+        }
+
+        uint16_t versionNet = 2;
+        versionNet = htons(versionNet);
+        ::memcpy(output.data(), &versionNet, sizeof(versionNet));
+        codec.send(conn, output.data(), output.length());
+      });
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kUnsuccess);
+                    assert(response.getPayload().empty());
+                    assert(response.getErrorMessage() == "connect closed");
+                    ++requestCallbackCount;
+                  });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverRequestReceived == 1);
+  assert(requestCallbackCount == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_server_closes_connection_for_unexpected_response_message_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> serverStopCompletePromise;
+  auto serverStopCompleteFuture = serverStopCompletePromise.get_future();
+
+  int connected = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  RpcServer server(&loop, serverFd);
+  TcpClient client(&loop, serverAddr);
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      serverStopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  client.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+
+      std::string output;
+      std::string errorMessage;
+      RpcResponse response(1, ResponseResult::kSuccess, "hello world", "");
+      bool res = response.encode(output, errorMessage);
+      if (!res || !errorMessage.empty()) {
+        std::cerr << "response encoding error" << std::endl;
+        std::abort();
+      }
+
+      codec.send(conn, output.data(), output.size());
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      serverStopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for server stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
+void rpc_client_closes_connection_for_unexpected_request_message_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int requestCallbackCount = 0;
+  int serverRequestReceived = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback(
+      [&](const TcpConnectionPtr &conn, const std::string &msg) {
+        if (msg.empty()) {
+          std::abort();
+        }
+
+        RpcMessageType messageType;
+        bool decodeRes = decodeHead(msg, messageType);
+        if (!decodeRes) {
+          conn->forceClose();
+          return;
+        }
+        assert(messageType == RpcMessageType::kRequest);
+
+        RpcRequest request;
+        std::string errorMsg;
+        std::string output;
+        bool res = request.decode(msg, errorMsg);
+        if (!res || !errorMsg.empty()) {
+          std::abort();
+        }
+
+        ++serverRequestReceived;
+
+        codec.send(conn, msg.data(), msg.length());
+      });
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  RpcClient client(&loop, serverAddr);
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call("EchoService", "Echo", "hello world",
+                  [&](const RpcResponse &response) {
+                    assert(response.getResponseResult() ==
+                           ResponseResult::kUnsuccess);
+                    assert(response.getPayload().empty());
+                    assert(response.getErrorMessage() == "connect closed");
+                    ++requestCallbackCount;
+                  });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverRequestReceived == 1);
+  assert(requestCallbackCount == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
 int main() {
   rpc_server_processes_echo_request_test();
   rpc_client_calls_echo_service_test();
@@ -5856,4 +6308,8 @@ int main() {
   rpc_server_rejects_async_request_when_active_request_limit_is_reached_test();
   rpc_server_rejects_async_request_when_global_active_request_limit_is_reached_test();
   rpc_server_releases_active_request_capacity_after_cancellation_test();
+  rpc_server_closes_connection_for_unsupported_protocol_version_test();
+  rpc_client_closes_connection_for_unsupported_protocol_version_test();
+  rpc_server_closes_connection_for_unexpected_response_message_test();
+  rpc_client_closes_connection_for_unexpected_request_message_test();
 }

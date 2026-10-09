@@ -144,21 +144,24 @@ client.setMaxPendingRequests(1);
 
 |Message|Fields|
 | :---: | :---: |
-|Request|messageType, requestId, service, method, payload|
-|Response|messageType, requestId, result, payload, errorMessage|
-|Cancel|messageType,requestId|
+|Request|version, messageType, requestId, service, method, payload|
+|Response|version, messageType, requestId, result, payload, errorMessage|
+|Cancel|version, messageType,requestId|
 
-
-- requestId 由客户端生成，服务端原样返回。
-- 客户端用 requestId 匹配 pending callback。
-- service、method、payload、errorMessage 都是二进制安全字符串。
-- 成功响应的 errorMessage 为空；失败响应的 payload 为空。
+- `version` 位于每条消息的开头，类型为 `uint16_t`；当前支持的版本为 `1`。
+- `requestId` 由客户端生成，服务端原样返回。
+- 客户端用 `requestId` 匹配 pending callback。
+- `service`、`method`、`payload`、`errorMessage` 都是二进制安全字符串。
+- 成功响应的 `errorMessage` 为空；失败响应的 `payload` 为空。
+- `messageType` 位于 version 之后，类型为 `uint8_t`，取值为 `Request`、`Response` 或 `Cancel`。
+- 收到不支持的 `version`、非法 `messageType`，或不符合端点方向的消息类型时，连接会被关闭。
+- 服务端只接收 `Request` 和 `Cancel`；客户端只接收 `Response`。
 
 
 ## 对象所属关系和线程
-- EventLoop 由调用方拥有；
-- RpcServer 拥有 TcpServer 和服务端 codec；
-- RpcClient 拥有 TcpClient 和客户端 codec；
+- `EventLoop` 由调用方拥有；
+- `RpcServer` 拥有 `TcpServer` 和服务端 codec；
+- `RpcClient` 拥有 `TcpClient` 和客户端 codec；
 - handler 在连接所属 IO loop 执行；
 - client 的连接回调和 RPC callback 在 client EventLoop 执行；
 - `threadNum == 0` 时服务端 handler 在 base EventLoop 执行。
