@@ -27,6 +27,17 @@ rpc_echo_example 会在同一进程中启动 Echo 服务端和客户端，输出
 ### 服务端：
 
 ``` C++
+// 设置消息收发的最大字节数(整个rpc消息的所有字节数,不包括LengthHeaderCodec 附加的 4 字节长度头),可配置长度[1, 64MiB]
+// 如果配置得小到连这个失败响应也放不下，服务端会关闭连接。
+// 未调用 setMaxMessageSize() 时，生效上限为 LengthHeaderCodec::kMaxMessageSize，即 64 MiB。
+// 当收到大于指定长度的消息时断开连接
+// 当发送大于指定长度的消息时返回"rpc message too large"
+// start() 前、base EventLoop 线程调用
+setMaxMessageSize(size_t);
+```
+<br>
+
+``` C++
 // 两者默认不限制，只能在 server.start() 前、RpcServer base EventLoop 线程调用；
 // 达到任一上限时，服务端返回失败响应："server request limit reached"
 // 只统计已登记 cancellation token 的异步请求；正常 reply、收到 RpcCancel、连接关闭都会释放名额。
@@ -37,7 +48,6 @@ setMaxActiveRequests(size_t)：
 setMaxActiveRequestsPerConnection(size_t)：
 ```
 <br>
-
 
 ``` C++
 // 注册异步回调函数
@@ -83,6 +93,17 @@ bool unregistered =
 
 
 ### 客户端：
+
+``` C++
+// 设置消息收发的最大字节数(整个rpc消息的所有字节数,不包括LengthHeaderCodec 附加的 4 字节长度头),可配置长度[1, 64MiB]。
+// 未调用 setMaxMessageSize() 时，生效上限为 LengthHeaderCodec::kMaxMessageSize，即 64 MiB。
+// 当收到大于指定长度的消息时客户端关闭连接，pending 请求随后收到 "connect closed"
+// 当发送大于指定长度的消息时调用回调函数并附上报错信息："rpc message too large"
+// 首次 connect() 前、所属 EventLoop 线程调用
+setMaxMessageSize(size_t);
+```
+<br>
+
 ``` C++
 RpcClient client(&loop, serverAddr);
 

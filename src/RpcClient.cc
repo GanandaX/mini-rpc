@@ -151,6 +151,15 @@ EventLoop *RpcClient::checkedLoop(EventLoop *loop) {
   return loop;
 }
 
+void RpcClient::setMaxMessageSize(size_t maxMessageSize) {
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+  assert(maxMessageSize > 0);
+  assert(maxMessageSize <= LengthHeaderCodec::kMaxMessageSize);
+
+  maxMessageSize_ = maxMessageSize;
+}
+
 void RpcClient::onConnection(const TcpConnectionPtr &conn) {
   loop_->assertInLoopThread();
 
@@ -170,11 +179,24 @@ void RpcClient::onConnection(const TcpConnectionPtr &conn) {
 }
 
 void RpcClient::onRpcMessage(const TcpConnectionPtr &conn,
-                             const std::string &rpcBytes) {
+                             const std::string &msg) {
   loop_->assertInLoopThread();
 
+  if (msg.empty()) {
+    conn->forceClose();
+    return;
+  }
+
+  size_t effectiveMaxMessageSize =
+      maxMessageSize_.value_or(LengthHeaderCodec::kMaxMessageSize);
+
+  if (msg.length() > effectiveMaxMessageSize) {
+    conn->forceClose();
+    return;
+  }
+
   RpcMessageType messageType;
-  if (!decodeHead(rpcBytes, messageType) ||
+  if (!decodeHead(msg, messageType) ||
       messageType != RpcMessageType::kResponse) {
     conn->forceClose();
     return;
@@ -182,7 +204,7 @@ void RpcClient::onRpcMessage(const TcpConnectionPtr &conn,
 
   RpcResponse response;
   std::string errorMsg;
-  bool res = response.decode(rpcBytes, errorMsg);
+  bool res = response.decode(msg, errorMsg);
   if (!res || !errorMsg.empty()) {
     conn->forceClose();
     return;
@@ -273,6 +295,18 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
   do {
     if ((status_ == Status::kConnected) && (conn_ != nullptr) &&
         (conn_->connected())) {
+      size_t outputMessageLen = RpcRequest::OutputMessageLen(
+          service.length(), method.length(), payload.length());
+      if ((!maxMessageSize_.has_value() &&
+           outputMessageLen > LengthHeaderCodec::kMaxMessageSize) ||
+          (maxMessageSize_.has_value() &&
+           outputMessageLen > maxMessageSize_.value())) {
+        RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+                             "rpc message too large");
+        cb(response);
+        return;
+      }
+
       if (maxPendingRequests_.has_value() &&
           pendingRequests_.size() >= maxPendingRequests_) {
         RpcResponse response(requestId, ResponseResult::kUnsuccess, "",

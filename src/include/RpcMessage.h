@@ -38,6 +38,8 @@ public:
   std::string getMethod() const;
   std::string getPayload() const;
 
+  static size_t OutputMessageLen(size_t serviceNameLen, size_t methodNameLen, size_t payloadLen);
+
 private:
   uint64_t requestId_;
   std::string service_;
@@ -58,6 +60,8 @@ public:
   ResponseResult getResponseResult() const;
   std::string getPayload() const;
   std::string getErrorMessage() const;
+
+  static size_t OutputMessageLen(size_t payloadLen, size_t errorMessageLen);
 
 private:
   uint64_t requestId_;

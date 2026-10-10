@@ -50,10 +50,12 @@ public:
 
   void cancel(uint64_t requestId);
 
+  void setMaxMessageSize(size_t maxMessageSize);
+
 private:
   static EventLoop *checkedLoop(EventLoop *loop);
   void onConnection(const TcpConnectionPtr &conn);
-  void onRpcMessage(const TcpConnectionPtr &conn, const std::string &rpcBytes);
+  void onRpcMessage(const TcpConnectionPtr &conn, const std::string &msg);
   void onConnectionError(int errorCode);
   void failAllPendingRequests(std::string errorMessage);
   void onRequestTimeout(uint64_t requestId);
@@ -83,6 +85,7 @@ private:
   std::atomic<uint64_t> nextRequestId_ = 1;
   std::optional<size_t> maxPendingRequests_;
   std::chrono::milliseconds defaultTimeout_;
+  std::optional<size_t> maxMessageSize_;
   EventLoop *loop_;
   Status status_;
   LengthHeaderCodec codec_;

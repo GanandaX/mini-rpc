@@ -38,7 +38,34 @@ private:
 namespace {
 void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
                     ResponseResult responseResult, std::string payload,
-                    std::string errorMessage) {
+                    std::string errorMessage, size_t maxMessageSize) {
+
+  size_t outputMessageLen =
+      RpcResponse::OutputMessageLen(payload.length(), errorMessage.length());
+  if (outputMessageLen > maxMessageSize) {
+    if (maxMessageSize <
+        RpcResponse::OutputMessageLen(0, strlen("rpc message too large"))) {
+      conn->forceClose();
+      return;
+    }
+
+    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+                         "rpc message too large");
+    std::string outputMessage;
+    errorMessage.clear();
+    bool res = response.encode(outputMessage, errorMessage);
+    if (!res || !errorMessage.empty()) {
+      conn->forceClose();
+      return;
+    }
+
+    if (conn->connected()) {
+      LengthHeaderCodec codec;
+      codec.send(conn, outputMessage.data(), outputMessage.length());
+    }
+    return;
+  }
+
   RpcResponse response(requestId, responseResult, payload, errorMessage);
   std::string outputMessage;
   errorMessage.clear();
@@ -184,6 +211,7 @@ RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
 
   server_ = std::make_unique<TcpServer>(loop, listenFd, threadNum);
   cancellationRegistry_ = std::make_shared<CancellationRegistry>();
+  maxMessageSize_ = std::make_shared<std::optional<size_t>>();
 
   lengthHeaderCodec_.setMessageCallback(std::bind(&RpcServer::onRpcMessage,
                                                   this, std::placeholders::_1,
@@ -365,9 +393,26 @@ void RpcServer::setMaxActiveRequestsPerConnection(size_t maxActiveRequests) {
   cancellationRegistry_->maxActiveRequestsPerConnection_ = maxActiveRequests;
 }
 
+void RpcServer::setMaxMessageSize(size_t maxMessageSize) {
+  loop_->assertInLoopThread();
+  assert(status_ == Status::kNotStarted);
+  assert(maxMessageSize > 0);
+  assert(maxMessageSize <= LengthHeaderCodec::kMaxMessageSize);
+
+  *maxMessageSize_ = maxMessageSize;
+}
+
 void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
                              const std::string &msg) {
   if (msg.empty()) {
+    conn->forceClose();
+    return;
+  }
+
+  size_t effectiveMaxMessageSize =
+      maxMessageSize_->value_or(LengthHeaderCodec::kMaxMessageSize);
+
+  if (msg.length() > effectiveMaxMessageSize) {
     conn->forceClose();
     return;
   }
@@ -424,6 +469,35 @@ void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
 void RpcServer::sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
                              ResponseResult responseResult, std::string payload,
                              std::string errorMessage) {
+
+  size_t outputMessageLen =
+      RpcResponse::OutputMessageLen(payload.length(), errorMessage.length());
+  size_t effectiveMaxMessageSize =
+      maxMessageSize_->value_or(LengthHeaderCodec::kMaxMessageSize);
+  if (outputMessageLen > effectiveMaxMessageSize) {
+    if (effectiveMaxMessageSize <
+        RpcResponse::OutputMessageLen(0, strlen("rpc message too large"))) {
+      conn->forceClose();
+      return;
+    }
+
+    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+                         "rpc message too large");
+    std::string outputMessage;
+    errorMessage.clear();
+    bool res = response.encode(outputMessage, errorMessage);
+    if (!res || !errorMessage.empty()) {
+      conn->forceClose();
+      return;
+    }
+
+    if (conn->connected()) {
+      lengthHeaderCodec_.send(conn, outputMessage.data(),
+                              outputMessage.length());
+    }
+    return;
+  }
+
   RpcResponse response(requestId, responseResult, payload, errorMessage);
   std::string outputMessage;
   errorMessage.clear();
@@ -528,12 +602,13 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
 
   std::weak_ptr<CancellationRegistry> weakCancellationRegistryPtr =
       cancellationRegistry_;
+  std::weak_ptr<std::optional<size_t>> weakMaxMessageSizePtr = maxMessageSize_;
 
   std::shared_ptr<std::atomic<bool>> repliedFlag =
       std::make_shared<std::atomic<bool>>(false);
   std::function<void(RpcResult)> reply =
-      [weakPtr, requestId, repliedFlag,
-       weakCancellationRegistryPtr](RpcResult rpcResult) -> void {
+      [weakPtr, requestId, repliedFlag, weakCancellationRegistryPtr,
+       weakMaxMessageSizePtr](RpcResult rpcResult) -> void {
     if (repliedFlag->exchange(true)) {
       return;
     }
@@ -552,24 +627,31 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
       rpcResult = {ResponseResult::kUnsuccess, "", "invalid handler result"};
     }
 
-    conn->loop()->queueInLoop([conn, requestId,
-                               rpcResult = std::move(rpcResult),
-                               weakCancellationRegistryPtr]() mutable {
-      auto registry = weakCancellationRegistryPtr.lock();
-      if (!registry) {
-        return;
-      }
+    conn->loop()->queueInLoop(
+        [conn, requestId, rpcResult = std::move(rpcResult),
+         weakCancellationRegistryPtr, weakMaxMessageSizePtr]() mutable {
+          auto registry = weakCancellationRegistryPtr.lock();
+          if (!registry) {
+            return;
+          }
+          auto maxMessageSize = weakMaxMessageSizePtr.lock();
+          if (!maxMessageSize) {
+            return;
+          }
 
-      auto token = registry->take(conn, requestId);
+          auto token = registry->take(conn, requestId);
 
-      if (!token.has_value() || token->isCanceled()) {
-        return;
-      }
+          if (!token.has_value() || token->isCanceled()) {
+            return;
+          }
 
-      sendFramedData(conn, requestId, rpcResult.result,
-                     std::move(rpcResult.payload),
-                     std::move(rpcResult.errorMessage));
-    });
+          size_t effectiveMaxMessageSize =
+              maxMessageSize->value_or(LengthHeaderCodec::kMaxMessageSize);
+
+          sendFramedData(
+              conn, requestId, rpcResult.result, std::move(rpcResult.payload),
+              std::move(rpcResult.errorMessage), effectiveMaxMessageSize);
+        });
   };
 
   conn->loop()->runInLoop(

@@ -63,6 +63,8 @@ public:
 
   void setMaxActiveRequestsPerConnection(size_t maxActiveRequests);
 
+  void setMaxMessageSize(size_t maxMessageSize);
+
 private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 
@@ -87,6 +89,7 @@ private:
 private:
   enum class Status { kNotStarted, kRunning, kStopping, kStopped };
 
+  std::shared_ptr<std::optional<size_t>> maxMessageSize_;
   EventLoop *loop_;
   Status status_;
   LengthHeaderCodec lengthHeaderCodec_;

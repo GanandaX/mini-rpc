@@ -110,9 +110,8 @@ bool RpcRequest::encode(std::string &output, std::string &errorMessage) const {
     return false;
   }
 
-  size_t msgLen = VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN +
-                  SERVICE_NAME_LEN + METHOD_NAME_LEN + PALOAD_MESSAGE_LEN +
-                  service_.length() + method_.length() + payload_.length();
+  size_t msgLen =
+      OutputMessageLen(service_.length(), method_.length(), payload_.length());
 
   output.resize(msgLen);
   char *data = output.data();
@@ -245,6 +244,13 @@ std::string RpcRequest::getMethod() const { return method_; }
 
 std::string RpcRequest::getPayload() const { return payload_; }
 
+size_t RpcRequest::OutputMessageLen(size_t serviceNameLen, size_t methodNameLen,
+                                    size_t payloadLen) {
+  return VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + SERVICE_NAME_LEN +
+         METHOD_NAME_LEN + PALOAD_MESSAGE_LEN + serviceNameLen + methodNameLen +
+         payloadLen;
+}
+
 RpcResponse::RpcResponse()
     : requestId_(0), responseResult_(ResponseResult::kUnsuccess), payload_(),
       errorMessage_() {}
@@ -274,9 +280,11 @@ bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
     return false;
   }
 
-  size_t msgLen = VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN +
-                  RESPONSE_RESULT_LEN + PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN +
-                  payload_.length() + errorMessage_.length();
+  size_t msgLen = OutputMessageLen(payload_.length(), errorMessage_.length());
+
+  // VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN +
+  //     PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN + payload_.length() +
+  //     errorMessage_.length();
 
   output.resize(msgLen);
   char *data = output.data();
@@ -424,6 +432,12 @@ ResponseResult RpcResponse::getResponseResult() const {
 std::string RpcResponse::getPayload() const { return payload_; }
 
 std::string RpcResponse::getErrorMessage() const { return errorMessage_; }
+
+size_t RpcResponse::OutputMessageLen(size_t payloadLen,
+                                     size_t errorMessageLen) {
+  return VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN +
+         PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN + payloadLen + errorMessageLen;
+}
 
 RpcCancel::RpcCancel() : requestId_(0) {}
 
