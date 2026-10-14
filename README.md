@@ -19,9 +19,54 @@
 ```bash
 cmake -S . -B build
 cmake --build build
+
 ./build/rpc_echo_example
 ```
 rpc_echo_example 会在同一进程中启动 Echo 服务端和客户端，输出响应 payload 后优雅退出。
+
+***
+
+
+rpc_echo_server_example 会启动Echo服务端，其可以通过后接端口来指定端口号或不输入等待系统自动分配。server中包含三个方法，分别为echo、async_echo 和 async_echo_2。在server启动后会打印ip和端口。在调用rpc_echo_client_example时需在后面指定server的ip和端口。client在执行完后自动退出，但server会常驻。
+
+```bash
+./build/rpc_echo_server_example 
+server: 127.0.0.1:41545            
+pid: 308728
+```  
+```txt
+第一个终端
+实际运行时会显示当前状态下的ip和端口 
+```  
+<br>
+
+
+```bash
+./build/rpc_echo_client_example 127.0.0.1 41545
+```
+```txt
+第二个终端
+实际运行时要用服务端打印的端口
+```
+<br>
+
+`指定端口`
+```bash
+./build/rpc_echo_server_example 1122
+server: 127.0.0.1:1122
+pid: 311062
+```  
+```txt
+第一个终端 
+```   
+<br>
+
+```bash
+./build/rpc_echo_client_example 127.0.0.1 1122
+```
+```txt
+第二个终端
+```   
 
 ## 基本用法
 ### 服务端：

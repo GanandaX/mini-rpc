@@ -37,6 +37,8 @@ function(add_example name)
 endfunction()
 
 add_example(rpc_echo_example)
+add_example(rpc_echo_server_example)
+add_example(rpc_echo_client_example)
 
 
 include(CTest)
