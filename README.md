@@ -1,6 +1,8 @@
 # mini_rpc
-
+```txt
 基于 mini_muduo 实现的第一版 C++ RPC。
+构建前，请将 mini_rpc 和 mini_muduo 克隆到同一父目录下，并确保 mini_muduo 的本地目录名为 mini_muduo。
+```
 
 ## Scope
 
