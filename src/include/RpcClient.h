@@ -37,10 +37,15 @@ public:
                 const std::string &payload, RpcCallback cb,
                 std::chrono::milliseconds timeout);
 
-  uint64_t call(const std::string &service, const std::string &method,
-                const std::string &payload, RpcCallback cb,
-                std::chrono::milliseconds timeout, bool allowReconnect,
-                std::chrono::milliseconds reconnectTimeout = std::chrono::milliseconds(0));
+  /**
+   * 当resendLimit赋值为0时表示关闭重连后重发
+   */
+  uint64_t call(
+      const std::string &service, const std::string &method,
+      const std::string &payload, RpcCallback cb,
+      std::chrono::milliseconds timeout, bool allowReconnect,
+      std::chrono::milliseconds reconnectTimeout = std::chrono::milliseconds(0),
+      std::optional<uint8_t> resendLimit = std::nullopt);
 
   void enableRetry();
   void disableRetry();
@@ -57,6 +62,12 @@ public:
    *  设置默认重连超时时间
    */
   void setDefaultReconnectTimeout(std::chrono::milliseconds defaultTimeout);
+
+  /**
+   * resendLimit默认值为1，允许设置为0表示关闭重连后重发。
+   * 必须在首次 connect() 前，在所属 EventLoop 线程中设置
+   */
+  void setDefaultResendLimit(uint8_t resendLimit);
 
   void cancel(uint64_t requestId);
 
@@ -78,7 +89,8 @@ private:
                   const std::string &method, const std::string &payload,
                   RpcCallback cb, std::chrono::milliseconds timeout,
                   bool allowReconnect,
-                  std::chrono::milliseconds reconnectTimeout);
+                  std::chrono::milliseconds reconnectTimeout,
+                  std::optional<uint8_t> resendLimit);
 
   void clearExpiredIgnoredResponseRequests();
 
@@ -132,6 +144,7 @@ private:
       ignoredResponseRequests_;
 
   std::chrono::milliseconds defaultReconnectTimeout_;
+  uint8_t defaultResendLimit_;
   bool defaultAllowResend_;
   bool manualDisconnection_;
 };

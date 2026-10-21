@@ -10,7 +10,8 @@ RpcClient::RpcClient(EventLoop *loop, const InetAddress &serverAddr)
       status_(Status::kDisconnected), tcpClient_(loop_, serverAddr),
       clearIgnoredResponseRequestsTimerId_(std::nullopt),
       defaultReconnectTimeout_(std::chrono::milliseconds(1000)),
-      defaultAllowResend_(false), manualDisconnection_(false) {
+      defaultResendLimit_(1), defaultAllowResend_(false),
+      manualDisconnection_(false) {
   loop_->assertInLoopThread();
 
   codec_.setMessageCallback(std::bind(&RpcClient::onRpcMessage, this,
@@ -98,7 +99,8 @@ uint64_t RpcClient::call(const std::string &service, const std::string &method,
 uint64_t RpcClient::call(const std::string &service, const std::string &method,
                          const std::string &payload, RpcCallback cb,
                          std::chrono::milliseconds timeout, bool allowReconnect,
-                         std::chrono::milliseconds reconnectTimeout) {
+                         std::chrono::milliseconds reconnectTimeout,
+                         std::optional<uint8_t> resendLimit) {
   assert(cb != nullptr);
   assert(timeout >= std::chrono::milliseconds{0});
   assert(reconnectTimeout >= std::chrono::milliseconds(0));
@@ -107,13 +109,13 @@ uint64_t RpcClient::call(const std::string &service, const std::string &method,
 
   if (loop_->isInLoopThread()) {
     callInLoop(requestId, service, method, payload, std::move(cb), timeout,
-               allowReconnect, reconnectTimeout);
+               allowReconnect, reconnectTimeout, resendLimit);
   } else {
     loop_->queueInLoop([this, requestId, service, method, payload,
                         callback = std::move(cb), timeout, allowReconnect,
-                        reconnectTimeout]() mutable {
+                        reconnectTimeout, resendLimit]() mutable {
       callInLoop(requestId, service, method, payload, std::move(callback),
-                 timeout, allowReconnect, reconnectTimeout);
+                 timeout, allowReconnect, reconnectTimeout, resendLimit);
     });
   }
   return requestId;
@@ -152,6 +154,12 @@ void RpcClient::setDefaultReconnectTimeout(
   assert(!hasConnectAttempted_);
 
   defaultReconnectTimeout_ = defaultTimeout;
+}
+
+void RpcClient::setDefaultResendLimit(uint8_t resendLimit) {
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+  defaultResendLimit_ = resendLimit;
 }
 
 void RpcClient::cancel(uint64_t requestId) {
@@ -421,7 +429,8 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
                            const std::string &payload, RpcCallback cb,
                            std::chrono::milliseconds timeout,
                            bool allowReconnect,
-                           std::chrono::milliseconds reconnectTimeout) {
+                           std::chrono::milliseconds reconnectTimeout,
+                           std::optional<uint8_t> resendLimit) {
   loop_->assertInLoopThread();
   assert(timeout >= std::chrono::milliseconds{0});
   assert(cb != nullptr);
@@ -457,10 +466,15 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
         break;
       }
 
-      uint8_t remainingResends = 1;
+      uint8_t remainingResends = resendLimit.value_or(defaultResendLimit_);
       if (allowReconnect && reconnectTimeout == std::chrono::milliseconds(0)) {
         reconnectTimeout = defaultReconnectTimeout_;
       }
+
+      if (!remainingResends) {
+        allowReconnect = false;
+      }
+
       pendingRequests_[requestId] = {service,
                                      method,
                                      payload,

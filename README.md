@@ -150,18 +150,26 @@ setMaxMessageSize(size_t);
 ```
 <br>
 
+```txt
+ 重连后自动重发请求
+ Tcp的自动重连和RpcClient的重连后自动重发请求是两独立的开关, 默认只有一次重发机会
+ 响应超时是指一个请求发送至server端后指定时常内没收到响应则超时，等待重连超时是指连接在非客户端主动断开后指定时常内没重新连接则超时。
+ 意外断线后取消原响应定时器，开始等待重连；重发时重新计算完整的响应超时。单次 TCP 重连失败不重置等待期限。
+ 响应超时："rpc request timeout"。等待重连超时："rpc reconnect timeout"。
+ 默认是tcp不自动重连且重连后不会重发Rpc请求，默认重连时常为1s。若需开启重连后自动重发要开启Tcp的自动重连，且在call时配置重连后自动重发并配置重连超时时间；
+ 还可使用全局配置setAllowReconnect和setDefaultReconnectTimeout但必须在首次 connect() 前、client 所属 EventLoop 线程中。
+ 可以使用call中特别指定当前call是否之开启重连后自动重发和重连超时时常。
+ 四／五参数 call() 使用默认重发配置, 带 bool 的版本覆盖本次开关。
+ reconnectTimeout 省略或传 0 表示使用默认等待时长，不是无限等待。
+ setDefaultResendLimit() 只能在首次 connect() 前、客户端所属 EventLoop 线程调用。
+ 实际重发或一轮等待重连超时，各消耗一次机会；等待超时后仍有机会就继续等待，耗尽才回调 "rpc reconnect timeout"
+ 提供了重发次数的配置，可以通过setDefaultResendLimit和在call中去指定对应的从发次数，按就近原则去获取重发次数。
+ 在call中指定resendLimit为0，将关闭重连后重发。
+ 重发可能会重复执行业务，服务端目前不提供去重保证
+```
+
 ``` C++
-// 重连后自动重发请求
-// Tcp的自动重连和RpcClient的重连后自动重发请求是两独立的开关, 目前只有一次重发机会
-// 响应超时是指一个请求发送至server端后指定时常内没收到响应则超时，等待重连超时是指连接在非客户端主动断开后指定时常内没重新连接则超时。
-// 意外断线后取消原响应定时器，开始等待重连；重发时重新计算完整的响应超时。单次 TCP 重连失败不重置等待期限。
-// 响应超时："rpc request timeout"。等待重连超时："rpc reconnect timeout"。
-// 默认是tcp不自动重连且重连后不会重发Rpc请求，默认重连时常为1s。若需开启重连后自动重发要开启Tcp的自动重连，且在call时配置重连后自动重发并配置重连超时时间；
-// 还可使用全局配置setAllowReconnect和setDefaultReconnectTimeout但必须在首次 connect() 前、client 所属 EventLoop 线程中。
-// 可以使用call中特别指定当前call是否之开启重连后自动重发和重连超时时常。
-// 四／五参数 call() 使用默认重发配置, 带 bool 的版本覆盖本次开关。
-// reconnectTimeout 省略或传 0 表示使用默认等待时长，不是无限等待。
-// 重发可能会重复执行业务，服务端目前不提供去重保证
+    // 通过call配置自动重发，重连后重发次数为默认的1次，开启重连后重发，重发超时时间为1s
     RpcClient client(&loop, serverAddr);
     client.enableRetry();
     client.call(
@@ -173,7 +181,7 @@ setMaxMessageSize(size_t);
     std::chrono::milliseconds(1000));
 
 
-          // 或者
+    // 通过全局配置自动重发，重连后重发次数为默认的1次，开启重连后重发，重发超时时间为1s
     RpcClient client(&loop, serverAddr);
     client.enableRetry();
     client.setAllowReconnect(true);
@@ -183,6 +191,32 @@ setMaxMessageSize(size_t);
         [&](const RpcResponse &response) {
             ...
         });
+
+    // 通过call配置自动重发，默认次数为 5，本次指定 2，使用本次配置，开启重连后重发，重发超时时间为500ms
+    RpcClient client(&loop, serverAddr);
+    client.enableRetry();
+    client.setDefaultResendLimit(5);
+    client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+                ...
+            },
+            std::chrono::milliseconds(1000), true, std::chrono::milliseconds(500),
+            2);
+
+
+
+    // 通过call配置自动重发，设置重连后重发次数为0次，即关闭重发，即使全局配置重发次数为3，此次request也不开启重发
+    RpcClient client(&loop, serverAddr);
+    client.enableRetry();
+    client.setDefaultResendLimit(3);
+    client.call(
+    "EchoService", "Echo", "hello world",
+        [&](const RpcResponse &response) {
+            ...
+        },
+        std::chrono::milliseconds(1000), true, std::chrono::milliseconds(500),
+        0);
 ```
 <br>
 
