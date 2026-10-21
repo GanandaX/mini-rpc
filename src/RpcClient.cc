@@ -1,12 +1,16 @@
 #include "RpcClient.h"
 
 #include <assert.h>
+#include <map>
+#include <vector>
 
 RpcClient::RpcClient(EventLoop *loop, const InetAddress &serverAddr)
     : hasConnectAttempted_(false), maxPendingRequests_(std::nullopt),
       defaultTimeout_(std::chrono::milliseconds(0)), loop_(checkedLoop(loop)),
       status_(Status::kDisconnected), tcpClient_(loop_, serverAddr),
-      clearIgnoredResponseRequestsTimerId_(std::nullopt) {
+      clearIgnoredResponseRequestsTimerId_(std::nullopt),
+      defaultReconnectTimeout_(std::chrono::milliseconds(1000)),
+      defaultAllowResend_(false), manualDisconnection_(false) {
   loop_->assertInLoopThread();
 
   codec_.setMessageCallback(std::bind(&RpcClient::onRpcMessage, this,
@@ -45,6 +49,7 @@ void RpcClient::setConnectionCallback(ConnectionCallback cb) {
 
   connectionCallback_ = std::move(cb);
 }
+
 void RpcClient::setConnectionErrorCallback(ConnectionErrorCallback cb) {
   loop_->assertInLoopThread();
   assert(hasConnectAttempted_ == false);
@@ -65,48 +70,50 @@ void RpcClient::connect() {
 
 void RpcClient::disconnect() {
   loop_->assertInLoopThread();
-  if (status_ != Status::kConnected && status_ != Status::kConnecting) {
-    return;
-  }
 
-  status_ = Status::kDisconnecting;
+  manualDisconnection_ = true;
   tcpClient_.disconnect();
+
+  if (status_ != Status::kConnected && status_ != Status::kConnecting) {
+    failAllPendingRequests("connect closed");
+  } else if (status_ == Status::kConnected) {
+    status_ = Status::kDisconnecting;
+  } else if (status_ == Status::kConnecting) {
+    status_ = Status::kDisconnected;
+    failAllPendingRequests("connect closed");
+  }
 }
 
 uint64_t RpcClient::call(const std::string &service, const std::string &method,
                          const std::string &payload, RpcCallback cb) {
-  assert(cb != nullptr);
-
-  uint64_t requestId = nextRequestId_.fetch_add(1);
-
-  if (loop_->isInLoopThread()) {
-    callInLoop(requestId, service, method, payload, std::move(cb),
-               defaultTimeout_);
-  } else {
-    loop_->queueInLoop([this, requestId, service, method, payload,
-                        callback = std::move(cb)]() mutable {
-      callInLoop(requestId, service, method, payload, std::move(callback),
-                 defaultTimeout_);
-    });
-  }
-  return requestId;
+  return call(service, method, payload, cb, defaultTimeout_);
 }
 
 uint64_t RpcClient::call(const std::string &service, const std::string &method,
                          const std::string &payload, RpcCallback cb,
                          std::chrono::milliseconds timeout) {
+  return call(service, method, payload, cb, timeout, defaultAllowResend_);
+}
+
+uint64_t RpcClient::call(const std::string &service, const std::string &method,
+                         const std::string &payload, RpcCallback cb,
+                         std::chrono::milliseconds timeout, bool allowReconnect,
+                         std::chrono::milliseconds reconnectTimeout) {
   assert(cb != nullptr);
   assert(timeout >= std::chrono::milliseconds{0});
+  assert(reconnectTimeout >= std::chrono::milliseconds(0));
 
   uint64_t requestId = nextRequestId_.fetch_add(1);
 
   if (loop_->isInLoopThread()) {
-    callInLoop(requestId, service, method, payload, std::move(cb), timeout);
+    callInLoop(requestId, service, method, payload, std::move(cb), timeout,
+               allowReconnect, reconnectTimeout);
   } else {
     loop_->queueInLoop([this, requestId, service, method, payload,
-                        callback = std::move(cb), timeout]() mutable {
+                        callback = std::move(cb), timeout, allowReconnect,
+                        reconnectTimeout]() mutable {
       callInLoop(requestId, service, method, payload, std::move(callback),
-                 timeout);
+                 timeout, allowReconnect, reconnectTimeout);
     });
   }
   return requestId;
@@ -138,6 +145,15 @@ void RpcClient::setDefaultTimeout(std::chrono::milliseconds defaultTimeout) {
   defaultTimeout_ = defaultTimeout;
 }
 
+void RpcClient::setDefaultReconnectTimeout(
+    std::chrono::milliseconds defaultTimeout) {
+  assert(defaultTimeout > std::chrono::milliseconds(0));
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+
+  defaultReconnectTimeout_ = defaultTimeout;
+}
+
 void RpcClient::cancel(uint64_t requestId) {
   if (loop_->isInLoopThread()) {
     cancelInLoop(requestId);
@@ -160,21 +176,42 @@ void RpcClient::setMaxMessageSize(size_t maxMessageSize) {
   maxMessageSize_ = maxMessageSize;
 }
 
+void RpcClient::setAllowReconnect(bool allow) {
+  loop_->assertInLoopThread();
+  assert(!hasConnectAttempted_);
+
+  defaultAllowResend_ = allow;
+}
+
 void RpcClient::onConnection(const TcpConnectionPtr &conn) {
   loop_->assertInLoopThread();
 
   if (conn->connected()) {
     conn_ = conn;
     status_ = Status::kConnected;
-  } else {
-    conn_.reset();
-    status_ = Status::kDisconnected;
-    failAllPendingRequests("connect closed");
-    clearIgnoredResponseRequests();
-  }
+    manualDisconnection_ = false;
 
-  if (connectionCallback_) {
-    connectionCallback_(conn);
+    if (connectionCallback_) {
+      connectionCallback_(conn);
+    }
+
+    if (conn == conn_) {
+      checkReconnect();
+    }
+  } else {
+    status_ = Status::kDisconnected;
+    conn_.reset();
+
+    if (manualDisconnection_) {
+      failAllPendingRequests("connect closed");
+    } else {
+      failAllDisreconnectRequests("connect closed");
+    }
+    clearIgnoredResponseRequests();
+
+    if (connectionCallback_) {
+      connectionCallback_(conn);
+    }
   }
 }
 
@@ -236,7 +273,7 @@ void RpcClient::onConnectionError(int errorCode) {
 
   conn_.reset();
   status_ = Status::kDisconnected;
-  failAllPendingRequests("connection error");
+  failAllDisreconnectRequests("connection error");
   clearIgnoredResponseRequests();
   if (connectionErrorCallback_) {
     connectionErrorCallback_(errorCode);
@@ -262,11 +299,76 @@ void RpcClient::failAllPendingRequests(std::string errorMessage) {
   }
 }
 
+void RpcClient::failAllDisreconnectRequests(std::string errorMessage) {
+  loop_->assertInLoopThread();
+
+  std::vector<uint64_t> waitingToChangePhase;
+  std::vector<uint64_t> waitingToCallFailCallback;
+
+  for (auto &item : pendingRequests_) {
+    if (item.second.phase == RequestPhase::kWaitingResponse) {
+      if (item.second.allowReconnect) {
+        if (item.second.remainingResends) {
+          waitingToChangePhase.push_back(item.first);
+        } else {
+          waitingToCallFailCallback.push_back(item.first);
+        }
+      } else if (!item.second.allowReconnect) {
+        waitingToCallFailCallback.push_back(item.first);
+      }
+    }
+  }
+
+  for (auto item : waitingToChangePhase) {
+    auto it = pendingRequests_.find(item);
+    if (it == pendingRequests_.end()) {
+      continue;
+    }
+
+    it->second.phase = RequestPhase::kWaitingReconnect;
+    if (it->second.timerId.has_value()) {
+      loop_->cancel(it->second.timerId.value());
+      it->second.timerId.reset();
+    }
+
+    TimerId timerId = loop_->runAfter(
+        it->second.reconnectTimeout,
+        std::bind(&RpcClient::onReconnectTimeout, this, it->first));
+    it->second.timerId = timerId;
+  }
+
+  std::map<uint64_t, RpcCallback> callbacks;
+  for (auto item : waitingToCallFailCallback) {
+    auto it = pendingRequests_.find(item);
+    if (it == pendingRequests_.end()) {
+      continue;
+    }
+
+    if (it->second.timerId.has_value()) {
+      loop_->cancel(it->second.timerId.value());
+      it->second.timerId.reset();
+    }
+
+    callbacks.insert({it->first, std::move(it->second.callback)});
+    pendingRequests_.erase(it);
+  }
+
+  for (auto &item : callbacks) {
+    RpcResponse response(item.first, ResponseResult::kUnsuccess, "",
+                         errorMessage);
+    item.second(response);
+  }
+}
+
 void RpcClient::onRequestTimeout(uint64_t requestId) {
   loop_->assertInLoopThread();
 
   auto findRes = pendingRequests_.find(requestId);
   if (findRes == pendingRequests_.end()) {
+    return;
+  }
+
+  if (findRes->second.phase != RequestPhase::kWaitingResponse) {
     return;
   }
 
@@ -284,10 +386,42 @@ void RpcClient::onRequestTimeout(uint64_t requestId) {
   (pendingRequest.callback)(response);
 }
 
+void RpcClient::onReconnectTimeout(uint64_t requestId) {
+  loop_->assertInLoopThread();
+
+  auto findRes = pendingRequests_.find(requestId);
+  if (findRes == pendingRequests_.end()) {
+    return;
+  }
+
+  if (findRes->second.phase != RequestPhase::kWaitingReconnect) {
+    return;
+  }
+
+  findRes->second.remainingResends--;
+
+  if (!findRes->second.remainingResends) {
+    PendingRequest pendingRequest = std::move(findRes->second);
+    pendingRequests_.erase(findRes);
+
+    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+                         "rpc reconnect timeout");
+    (pendingRequest.callback)(response);
+    return;
+  }
+
+  TimerId timerId = loop_->runAfter(
+      findRes->second.reconnectTimeout,
+      std::bind(&RpcClient::onReconnectTimeout, this, requestId));
+  pendingRequests_[requestId].timerId = timerId;
+}
+
 void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
                            const std::string &method,
                            const std::string &payload, RpcCallback cb,
-                           std::chrono::milliseconds timeout) {
+                           std::chrono::milliseconds timeout,
+                           bool allowReconnect,
+                           std::chrono::milliseconds reconnectTimeout) {
   loop_->assertInLoopThread();
   assert(timeout >= std::chrono::milliseconds{0});
   assert(cb != nullptr);
@@ -323,7 +457,20 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
         break;
       }
 
-      pendingRequests_[requestId] = {std::move(cb), std::nullopt};
+      uint8_t remainingResends = 1;
+      if (allowReconnect && reconnectTimeout == std::chrono::milliseconds(0)) {
+        reconnectTimeout = defaultReconnectTimeout_;
+      }
+      pendingRequests_[requestId] = {service,
+                                     method,
+                                     payload,
+                                     std::move(cb),
+                                     timeout,
+                                     allowReconnect,
+                                     RequestPhase::kWaitingResponse,
+                                     remainingResends,
+                                     reconnectTimeout,
+                                     std::nullopt};
       if (timeout > std::chrono::milliseconds(0)) {
         TimerId timerId = loop_->runAfter(
             timeout, std::bind(&RpcClient::onRequestTimeout, this, requestId));
@@ -414,4 +561,62 @@ void RpcClient::sendCancel(uint64_t requestId) {
   }
 
   codec_.send(conn_, output.data(), output.length());
+}
+
+void RpcClient::checkReconnect() {
+  loop_->assertInLoopThread();
+
+  std::vector<uint64_t> waitingToResendRequest;
+  for (auto &item : pendingRequests_) {
+    if (item.second.phase != RequestPhase::kWaitingReconnect ||
+        !item.second.allowReconnect || item.second.remainingResends == 0) {
+      continue;
+    }
+
+    waitingToResendRequest.push_back(item.first);
+  }
+
+  auto conn = conn_;
+  for (auto item : waitingToResendRequest) {
+    if (!conn || conn != conn_ || status_ != Status::kConnected ||
+        !conn->connected()) {
+      return;
+    }
+
+    auto it = pendingRequests_.find(item);
+    if (it == pendingRequests_.end() ||
+        it->second.phase != RequestPhase::kWaitingReconnect) {
+      continue;
+    }
+
+    if (it->second.timerId.has_value()) {
+      loop_->cancel(it->second.timerId.value());
+      it->second.timerId.reset();
+    }
+
+    --it->second.remainingResends;
+    it->second.phase = RequestPhase::kWaitingResponse;
+
+    RpcRequest request(it->first, it->second.serviceName, it->second.methodName,
+                       it->second.payload);
+    std::string output;
+    std::string errorMsg;
+    bool res = request.encode(output, errorMsg);
+    if (!res || !errorMsg.empty()) {
+      auto callback = std::move(it->second.callback);
+      RpcResponse response(it->first, ResponseResult::kUnsuccess, "", errorMsg);
+      pendingRequests_.erase(it->first);
+      callback(response);
+      continue;
+    }
+
+    if (it->second.requestTimeout > std::chrono::milliseconds(0)) {
+      TimerId timerId = loop_->runAfter(
+          it->second.requestTimeout,
+          std::bind(&RpcClient::onRequestTimeout, this, it->first));
+      it->second.timerId = timerId;
+    }
+
+    codec_.send(conn, output.data(), output.length());
+  }
 }

@@ -16,7 +16,8 @@ int main(int argc, char *argv[]) {
 
   int value = std::stoi(std::string(argv[2]));
   if (value < 1 || value > 65535) {
-    std::cerr << "usage: ./rpc_echo_client_example ip port(1-65535)" << std::endl;
+    std::cerr << "usage: ./rpc_echo_client_example ip port(1-65535)"
+              << std::endl;
     return 1;
   }
   uint16_t port = value;

@@ -14,7 +14,6 @@
 - 复杂参数与复杂序列化；
 - 服务发现、负载均衡、注册中心；
 - 服务端业务线程池调度；
-- 断线后的 RPC 自动重发。
 
 ## Build and run
 
@@ -144,10 +143,46 @@ bool unregistered =
 ``` C++
 // 设置消息收发的最大字节数(整个rpc消息的所有字节数,不包括LengthHeaderCodec 附加的 4 字节长度头),可配置长度[1, 64MiB]。
 // 未调用 setMaxMessageSize() 时，生效上限为 LengthHeaderCodec::kMaxMessageSize，即 64 MiB。
-// 当收到大于指定长度的消息时客户端关闭连接，pending 请求随后收到 "connect closed"
+// 当收到大于指定长度的消息时客户端关闭连接，随后按请求的重发配置处理
 // 当发送大于指定长度的消息时调用回调函数并附上报错信息："rpc message too large"
 // 首次 connect() 前、所属 EventLoop 线程调用
 setMaxMessageSize(size_t);
+```
+<br>
+
+``` C++
+// 重连后自动重发请求
+// Tcp的自动重连和RpcClient的重连后自动重发请求是两独立的开关, 目前只有一次重发机会
+// 响应超时是指一个请求发送至server端后指定时常内没收到响应则超时，等待重连超时是指连接在非客户端主动断开后指定时常内没重新连接则超时。
+// 意外断线后取消原响应定时器，开始等待重连；重发时重新计算完整的响应超时。单次 TCP 重连失败不重置等待期限。
+// 响应超时："rpc request timeout"。等待重连超时："rpc reconnect timeout"。
+// 默认是tcp不自动重连且重连后不会重发Rpc请求，默认重连时常为1s。若需开启重连后自动重发要开启Tcp的自动重连，且在call时配置重连后自动重发并配置重连超时时间；
+// 还可使用全局配置setAllowReconnect和setDefaultReconnectTimeout但必须在首次 connect() 前、client 所属 EventLoop 线程中。
+// 可以使用call中特别指定当前call是否之开启重连后自动重发和重连超时时常。
+// 四／五参数 call() 使用默认重发配置, 带 bool 的版本覆盖本次开关。
+// reconnectTimeout 省略或传 0 表示使用默认等待时长，不是无限等待。
+// 重发可能会重复执行业务，服务端目前不提供去重保证
+    RpcClient client(&loop, serverAddr);
+    client.enableRetry();
+    client.call(
+        "Service", "Method", "Payload",
+        [&](const RpcResponse &response) {
+            ...
+        },
+    std::chrono::milliseconds(1000), true,
+    std::chrono::milliseconds(1000));
+
+
+          // 或者
+    RpcClient client(&loop, serverAddr);
+    client.enableRetry();
+    client.setAllowReconnect(true);
+    client.setDefaultReconnectTimeout(std::chrono::milliseconds(1000));
+    client.call(
+        "Service", "Method", "Payload",
+        [&](const RpcResponse &response) {
+            ...
+        });
 ```
 <br>
 
@@ -183,7 +218,7 @@ client.call(
 
 
 ``` C++
-// 该方法用于取消对应请求的调用，若请求仍在等待响应，调用其原 callback 并返回失败响应；找不到 requestId 时静默返回。本地回调 "rpc request canceled"，并在请求已发送时向服务端发送 Cancel 帧。
+// 该方法用于取消对应请求的调用，若请求仍在等待响应，调用其原 callback 并返回失败响应；找不到 requestId 时静默返回。本地回调 "rpc request canceled"，请求在等待响应或等待重连时都可以取消；只有连接仍可用时才发送 Cancel 帧
 uint64_t requestId = client.call("EchoService", "Echo", "hello world",
     [&](const RpcResponse &response) {
     // 根据 response.getResponseResult()
@@ -241,8 +276,8 @@ client.setMaxPendingRequests(1);
 - 超时 callback 收到失败响应；
 - 迟到响应会被忽略；
 - 真正未知的 response requestId 会关闭连接；
-- 连接关闭会使 pending 请求收到 "connect closed"；
-- enableRetry() 只恢复 TCP 连接，不重发旧 RPC。
+- 意外断线时，允许重发且还有剩余机会的请求保留等待重连，其余请求收到 "connect closed"；主动 disconnect() 不保留请求等待重发。
+- 仅调用 enableRetry() 只开启 TCP 自动重连；RPC 重发需要另外配置。
 - 默认超时为永不超时
 - 当超过pending上限后直接调用回调函数并提示请求失败
 - 取消请求后直接调用回调函数并提示请求失败，若请求在取消前已发送给服务端在一定时间内客户端收到响应后直接忽略
@@ -257,4 +292,3 @@ client.setMaxPendingRequests(1);
 - 复杂序列化
 - 服务端业务线程池
 - 服务发现
-- 断线自动重发

@@ -37,6 +37,11 @@ public:
                 const std::string &payload, RpcCallback cb,
                 std::chrono::milliseconds timeout);
 
+  uint64_t call(const std::string &service, const std::string &method,
+                const std::string &payload, RpcCallback cb,
+                std::chrono::milliseconds timeout, bool allowReconnect,
+                std::chrono::milliseconds reconnectTimeout = std::chrono::milliseconds(0));
+
   void enableRetry();
   void disableRetry();
 
@@ -48,9 +53,16 @@ public:
    */
   void setDefaultTimeout(std::chrono::milliseconds defaultTimeout);
 
+  /**
+   *  设置默认重连超时时间
+   */
+  void setDefaultReconnectTimeout(std::chrono::milliseconds defaultTimeout);
+
   void cancel(uint64_t requestId);
 
   void setMaxMessageSize(size_t maxMessageSize);
+
+  void setAllowReconnect(bool allow);
 
 private:
   static EventLoop *checkedLoop(EventLoop *loop);
@@ -58,11 +70,15 @@ private:
   void onRpcMessage(const TcpConnectionPtr &conn, const std::string &msg);
   void onConnectionError(int errorCode);
   void failAllPendingRequests(std::string errorMessage);
+  void failAllDisreconnectRequests(std::string errorMessage);
   void onRequestTimeout(uint64_t requestId);
+  void onReconnectTimeout(uint64_t requestId);
 
   void callInLoop(uint64_t requestId, const std::string &service,
                   const std::string &method, const std::string &payload,
-                  RpcCallback cb, std::chrono::milliseconds timeout);
+                  RpcCallback cb, std::chrono::milliseconds timeout,
+                  bool allowReconnect,
+                  std::chrono::milliseconds reconnectTimeout);
 
   void clearExpiredIgnoredResponseRequests();
 
@@ -73,11 +89,28 @@ private:
 
   void sendCancel(uint64_t requestId);
 
+  void checkReconnect();
+
 private:
   enum class Status { kDisconnected, kConnecting, kDisconnecting, kConnected };
 
+  enum class RequestPhase {
+    kWaitingResponse, // 等待响应
+    kWaitingReconnect // 等待重连
+  };
+
   struct PendingRequest {
+    std::string serviceName;
+    std::string methodName;
+    std::string payload;
     RpcCallback callback;
+    std::chrono::milliseconds requestTimeout;
+
+    bool allowReconnect;
+    RequestPhase phase;
+    uint8_t remainingResends;
+    std::chrono::milliseconds reconnectTimeout;
+
     std::optional<TimerId> timerId;
   };
 
@@ -97,6 +130,10 @@ private:
   std::optional<TimerId> clearIgnoredResponseRequestsTimerId_;
   std::unordered_map<uint64_t, std::chrono::steady_clock::time_point>
       ignoredResponseRequests_;
+
+  std::chrono::milliseconds defaultReconnectTimeout_;
+  bool defaultAllowResend_;
+  bool manualDisconnection_;
 };
 
 #endif
