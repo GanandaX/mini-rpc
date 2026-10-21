@@ -6990,8 +6990,11 @@ void rpc_client_fails_pending_request_when_reconnect_wait_expires_test() {
   });
   server.start();
 
+  auto start = std::chrono::steady_clock::now();
+
   RpcClient client(&loop, serverAddr);
   client.enableRetry();
+  client.setDefaultResendLimit(2);
   client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
     if (conn->connected()) {
       ++connected;
@@ -7005,6 +7008,9 @@ void rpc_client_fails_pending_request_when_reconnect_wait_expires_test() {
             ++rpcErrorCallbackCount;
             client.disconnect();
 
+            auto end = std::chrono::steady_clock::now();
+            assert(end - start >= std::chrono::milliseconds(900));
+
             if (serverStopped && rpcErrorCallbackCount) {
               ++completionCount;
               stopCompletePromise.set_value();
@@ -7014,6 +7020,10 @@ void rpc_client_fails_pending_request_when_reconnect_wait_expires_test() {
           std::chrono::milliseconds(500), true, std::chrono::milliseconds(500));
     } else {
       ++clientDisconnected;
+
+      if (clientDisconnected == 1) {
+        start = std::chrono::steady_clock::now();
+      }
     }
   });
   client.connect();
