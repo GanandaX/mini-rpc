@@ -39,6 +39,7 @@ endfunction()
 add_example(rpc_echo_example)
 add_example(rpc_echo_server_example)
 add_example(rpc_echo_client_example)
+add_example(rpc_calculator_example)
 
 
 include(CTest)
@@ -52,3 +53,32 @@ if (BUILD_TESTING)
     add_mini_test(rpc_message_test)
     add_mini_test(rpc_server_test)
 endif()
+
+
+add_library(calculator_protocol STATIC
+    examples/CalculatorProtocol.cc
+)
+target_include_directories(calculator_protocol PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples
+)
+target_compile_features(calculator_protocol PUBLIC cxx_std_17)
+
+
+if (BUILD_TESTING)
+    add_executable(calculator_protocol_test
+        tests/calculator_protocol_test.cc
+    )
+
+    target_link_libraries(calculator_protocol_test PRIVATE
+        calculator_protocol
+        mini_rpc
+    )
+
+    add_test(
+        NAME calculator_protocol_test
+        COMMAND calculator_protocol_test
+    )
+endif()
+
+
+target_link_libraries(rpc_calculator_example PRIVATE calculator_protocol)
