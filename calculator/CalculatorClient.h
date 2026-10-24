@@ -1,5 +1,5 @@
-#ifndef CALCULATORCLIENT_H
-#define CALCULATORCLIENT_H
+#ifndef CALCULATOR_CLIENT_H
+#define CALCULATOR_CLIENT_H
 
 #include <string>
 #include <cstdint>

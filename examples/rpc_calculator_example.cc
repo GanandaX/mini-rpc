@@ -1,8 +1,8 @@
+#include "CalculatorClient.h"
 #include "CalculatorProtocol.h"
+#include "CalculatorService.h"
 #include "RpcClient.h"
 #include "RpcServer.h"
-
-#include "CalculatorClient.h"
 
 #include <assert.h>
 #include <future>
@@ -37,36 +37,9 @@ int main() {
     testCompletePromise.set_value();
     loop.quit();
   });
-  bool registered = server.registerAsyncMethod(
-      "Calculator", "Add",
-      [&](const std::string &payload, RpcCancellationToken cancellation,
-          RpcServer::RpcReply reply) {
-        std::string errorMessage;
-        CalculatorProtocol calculatorAdd;
-        bool res = calculatorAdd.requestDecode(payload, errorMessage);
 
-        if (!res || !errorMessage.empty()) {
-          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess, "",
-                                     "invalid add request"});
-          return;
-        }
-
-        if (cancellation.isCanceled()) {
-          return;
-        }
-
-        int64_t result =
-            static_cast<int64_t>(calculatorAdd.getA()) + calculatorAdd.getB();
-        if (result > INT32_MAX || result < INT32_MIN) {
-          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess, "",
-                                     "integer overflow"});
-          return;
-        }
-
-        calculatorAdd.setResult(result);
-        std::string msg = calculatorAdd.resultEncode();
-        reply(RpcServer::RpcResult{ResponseResult::kSuccess, msg, ""});
-      });
+  CalculatorService service;
+  bool registered = service.registerCalculatorService(server);
   assert(registered);
 
   server.start();
