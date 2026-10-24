@@ -506,6 +506,186 @@ void calculator_client_reports_error_for_invalid_result_payload_test() {
   assert(serverStopped == 1);
 }
 
+void calculator_client_uses_default_timeout_and_allows_zero_override_test() {
+
+  std::cout << "-------------------" << std::endl;
+
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> stopCompletePromise;
+  auto stopCompleteFuture = stopCompletePromise.get_future();
+
+  int connected = 0;
+  int serverMessageReceived = 0;
+  int timeoutRequest = 0;
+  int successRequest = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  LengthHeaderCodec codec;
+  TcpServer server(&loop, serverFd);
+
+  codec.setMessageCallback([&](const TcpConnectionPtr &conn,
+                               const std::string &payload) {
+    ++serverMessageReceived;
+
+    RpcMessageType messageType;
+    bool res = decodeHead(payload, messageType);
+    assert(res);
+    if (messageType == RpcMessageType::kCancel) {
+      return;
+    }
+
+    if (messageType == RpcMessageType::kRequest) {
+      RpcRequest request;
+      std::string errorMessage;
+      res = request.decode(payload, errorMessage);
+      if (!res || !errorMessage.empty()) {
+        std::cerr << __LINE__ << ": server decode error" << std::endl;
+        std::abort();
+        return;
+      }
+
+      RpcResponse response;
+      CalculatorProtocol calculatorAdd;
+      errorMessage.clear();
+      bool res =
+          calculatorAdd.requestDecode(request.getPayload(), errorMessage);
+
+      if (!res || !errorMessage.empty()) {
+        RpcResponse resp(request.getRequestId(), ResponseResult::kUnsuccess, "",
+                         "invalid add request");
+        response = resp;
+      } else {
+        int64_t result =
+            static_cast<int64_t>(calculatorAdd.getA()) + calculatorAdd.getB();
+
+        if (result > INT32_MAX || result < INT32_MIN) {
+          RpcResponse resp(request.getRequestId(), ResponseResult::kUnsuccess,
+                           "", "integer overflow");
+          response = resp;
+        } else {
+          calculatorAdd.setResult(result);
+          RpcResponse resp(request.getRequestId(), ResponseResult::kSuccess,
+                           calculatorAdd.resultEncode(), "");
+          response = resp;
+        }
+      }
+
+      std::string outputMessage;
+      errorMessage.clear();
+      res = response.encode(outputMessage, errorMessage);
+      if (!res || !errorMessage.empty()) {
+        std::cerr << __LINE__ << ": server encode error" << std::endl;
+        std::cerr << errorMessage << std::endl;
+        std::abort();
+        return;
+      }
+
+      if (conn->connected()) {
+        loop.runAfter(
+            std::chrono::milliseconds(1000), [&codec, conn, outputMessage]() {
+              codec.send(conn, outputMessage.data(), outputMessage.length());
+            });
+      }
+    } else {
+      std::cerr << "invalid message" << std::endl;
+      std::abort();
+    }
+
+    return;
+  });
+
+  server.setMessageCallback(std::bind(&LengthHeaderCodec::onMessage, &codec,
+                                      std::placeholders::_1,
+                                      std::placeholders::_2));
+
+  server.setPeerHalfCloseCallback(
+      [](const TcpConnectionPtr &conn) { conn->shutdown(); });
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      stopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+  server.start();
+
+  CalculatorClient client(&loop, serverAddr);
+  client.setDefaultTimeout(std::chrono::milliseconds(500));
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+
+      client.add(1, 2, [&](AddResult result) {
+        assert(result.status == ResponseResult::kUnsuccess);
+        assert(result.errorMessage == "rpc request timeout");
+
+        ++timeoutRequest;
+        if (timeoutRequest && successRequest) {
+          client.disconnect();
+        }
+      });
+
+      client.add(
+          1, 2,
+          [&](AddResult result) {
+            assert(result.status == ResponseResult::kSuccess);
+            assert(result.value == 3);
+
+            ++successRequest;
+            if (timeoutRequest && successRequest) {
+              client.disconnect();
+            }
+          },
+          std::chrono::milliseconds(0));
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      stopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for server destroy timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverMessageReceived == 3);
+  assert(timeoutRequest == 1);
+  assert(successRequest == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
 int main() {
   calculator_protocol_round_trips_signed_values_test();
   calculator_protocol_uses_big_endian_wire_format_test();
@@ -514,4 +694,5 @@ int main() {
   rpc_calculator_add_returns_error_on_integer_overflow_test();
   rpc_calculator_add_returns_error_for_invalid_payload_test();
   calculator_client_reports_error_for_invalid_result_payload_test();
+  calculator_client_uses_default_timeout_and_allows_zero_override_test();
 }

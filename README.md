@@ -284,6 +284,23 @@ client.add(1, 2, [&](AddResult result) {
 });
 ```
 
+<br/>
+
+```C++
+// 不传指定超时时间则沿用默认值、显式为 0 则不超时
+CalculatorClient client(&loop, serverAddr);
+client.setDefaultTimeout(std::chrono::milliseconds(500));
+
+client.add(1, 2, [&](AddResult result) {
+        ...
+      });
+
+client.add(1, 2, [&](AddResult result) {
+    ...
+    },
+    std::chrono::milliseconds(0));
+```
+
 
 ## 协议
 每条 RPC 消息先由 LengthHeaderCodec 分帧；它只处理消息边界，
