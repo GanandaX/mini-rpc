@@ -274,6 +274,16 @@ client.setMaxPendingRequests(1);
 ```
 <br>
 
+### 通过 `CalculatorClient::add` 交互
+``` C++
+// 在连接成功后调用 add()；封装负责参数编码和结果解码，回调通过 status 判断成功或失败，成功读取 value，失败读取 errorMessage。
+// add() 返回的 requestId 可用于 cancel()。
+CalculatorClient client(&loop, serverAddr);
+client.add(1, 2, [&](AddResult result) {
+    ...
+});
+```
+
 
 ## 协议
 每条 RPC 消息先由 LengthHeaderCodec 分帧；它只处理消息边界，

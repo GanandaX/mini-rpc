@@ -2,6 +2,8 @@
 #include "RpcClient.h"
 #include "RpcServer.h"
 
+#include "CalculatorClient.h"
+
 #include <assert.h>
 #include <future>
 #include <string>
@@ -30,7 +32,6 @@ int main() {
 
   EventLoop loop;
   RpcServer server(&loop, serverFd);
-  RpcClient client(&loop, serverAddr);
 
   server.setStopCompleteCallback([&]() {
     testCompletePromise.set_value();
@@ -70,27 +71,16 @@ int main() {
 
   server.start();
 
+  CalculatorClient client(&loop, serverAddr);
   client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
     if (conn->connected()) {
-      CalculatorProtocol calculatorAdd(-7, 12);
-      std::string msg = calculatorAdd.requestEncode();
-
-      client.call("Calculator", "Add", msg, [&](const RpcResponse &response) {
-        if (response.getResponseResult() == ResponseResult::kSuccess) {
-          CalculatorProtocol calculatorAdd;
-          std::string errorMessage;
-          bool result =
-              calculatorAdd.resultDecode(response.getPayload(), errorMessage);
-          if (!result || !errorMessage.empty()) {
-            std::cout << "calculator decode error: " << errorMessage << std::endl;
-            return;
-          }
-
-          std::cout << "-7 + 12 = " << calculatorAdd.getResult() << std::endl;
-        } else {
-          std::cout << "response error: " << response.getErrorMessage()
-                    << std::endl;
+      client.add(-7, 12, [&](AddResult result) {
+        if (result.status == ResponseResult::kSuccess) {
+          std::cout << "-7 + 12 = " << result.value << std::endl;
+        } else if (result.status == ResponseResult::kUnsuccess) {
+          std::cout << "error: " << result.errorMessage << std::endl;
         }
+
         client.disconnect();
       });
     } else {

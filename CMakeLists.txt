@@ -56,12 +56,24 @@ endif()
 
 
 add_library(calculator_protocol STATIC
-    examples/CalculatorProtocol.cc
+    calculator/CalculatorProtocol.cc
 )
 target_include_directories(calculator_protocol PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/examples
+    ${CMAKE_CURRENT_SOURCE_DIR}/calculator
 )
 target_compile_features(calculator_protocol PUBLIC cxx_std_17)
+
+
+add_library(calculator_client STATIC
+    calculator/CalculatorClient.cc
+)
+target_include_directories(calculator_client PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/calculator
+)
+target_link_libraries(calculator_client PUBLIC
+    mini_rpc
+    calculator_protocol
+)
 
 
 if (BUILD_TESTING)
@@ -70,8 +82,7 @@ if (BUILD_TESTING)
     )
 
     target_link_libraries(calculator_protocol_test PRIVATE
-        calculator_protocol
-        mini_rpc
+        calculator_client
     )
 
     add_test(
@@ -81,4 +92,4 @@ if (BUILD_TESTING)
 endif()
 
 
-target_link_libraries(rpc_calculator_example PRIVATE calculator_protocol)
+target_link_libraries(rpc_calculator_example PRIVATE calculator_client)
