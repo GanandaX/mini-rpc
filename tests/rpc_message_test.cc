@@ -1,8 +1,8 @@
+#include "RpcMessage.h"
 #include <assert.h>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <cstring>
-#include "RpcMessage.h"
 
 void rpc_request_round_trip_preserves_embedded_nul_test() {
   std::string expected("hello\0 world", 12);
@@ -309,6 +309,155 @@ void rpc_cancel_rejects_unsupported_protocol_version_test() {
   assert(errorMessage == "unsupported rpc protocol version");
 }
 
+void rpc_response_round_trip_preserves_explicit_error_code_test() {
+  {
+    RpcResponse response(1, ResponseResult::kUnsuccess,
+                         RpcErrorCode::REQUEST_TIMEOUT, "", "time out");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(res == true);
+    assert(errorMsg.empty());
+    assert(responseResolve.getErrorCode() == RpcErrorCode::REQUEST_TIMEOUT);
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kSuccess, "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(res == true);
+    assert(errorMsg.empty());
+    assert(responseResolve.getErrorCode() == RpcErrorCode::NO_ERROR);
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kUnsuccess, "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(res == true);
+    assert(errorMsg.empty());
+    assert(responseResolve.getErrorCode() == RpcErrorCode::BUSINESS_ERROR);
+  }
+}
+
+void rpc_response_rejects_invalid_error_codes_and_status_combinations_test() {
+  {
+    RpcResponse response(1, ResponseResult::kUnsuccess,
+                         static_cast<RpcErrorCode>(1000), "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(!response.encode(output, errorMessage));
+    assert(errorMessage == "error code invalid");
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kUnsuccess, RpcErrorCode::NO_ERROR,
+                         "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(!response.encode(output, errorMessage));
+    assert(errorMessage == "response result and error code not Compatible");
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kSuccess,
+                         RpcErrorCode::METHOD_NOT_FOUND, "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(!response.encode(output, errorMessage));
+    assert(errorMessage == "response result and error code not Compatible");
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kSuccess, RpcErrorCode::NO_ERROR,
+                         "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    uint16_t errorCode = static_cast<uint16_t>(RpcErrorCode::BUSINESS_ERROR);
+    errorCode = htons(errorCode);
+    uint16_t startIndex =
+        VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN;
+    char *data = output.data();
+    ::memcpy(data + startIndex, &errorCode, sizeof(errorCode));
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(!res);
+    assert(errorMsg == "response result and error code not Compatible");
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kSuccess, RpcErrorCode::NO_ERROR,
+                         "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    uint16_t errorCode = static_cast<uint16_t>(RpcErrorCode::ERROR_CODE_CNT);
+    errorCode = htons(errorCode);
+    uint16_t startIndex =
+        VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN;
+    char *data = output.data();
+    ::memcpy(data + startIndex, &errorCode, sizeof(errorCode));
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(!res);
+    assert(errorMsg == "error code invalid");
+  }
+
+  {
+    RpcResponse response(1, ResponseResult::kUnsuccess,
+                         RpcErrorCode::BUSINESS_ERROR, "", "");
+    std::string output;
+    std::string errorMessage;
+    assert(response.encode(output, errorMessage));
+    assert(errorMessage.empty());
+
+    uint16_t errorCode = static_cast<uint16_t>(RpcErrorCode::NO_ERROR);
+    errorCode = htons(errorCode);
+    uint16_t startIndex =
+        VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN;
+    char *data = output.data();
+    ::memcpy(data + startIndex, &errorCode, sizeof(errorCode));
+
+    RpcResponse responseResolve;
+    std::string errorMsg;
+    bool res = responseResolve.decode(output, errorMsg);
+
+    assert(!res);
+    assert(errorMsg == "response result and error code not Compatible");
+  }
+}
+
 int main() {
   rpc_request_round_trip_preserves_embedded_nul_test();
   rpc_request_round_trip_preserves_empty_payload_test();
@@ -325,4 +474,6 @@ int main() {
   rpc_request_rejects_unsupported_protocol_version_test();
   rpc_response_rejects_unsupported_protocol_version_test();
   rpc_cancel_rejects_unsupported_protocol_version_test();
+  rpc_response_round_trip_preserves_explicit_error_code_test();
+  rpc_response_rejects_invalid_error_codes_and_status_combinations_test();
 }

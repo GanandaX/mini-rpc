@@ -251,16 +251,17 @@ void rpc_client_receives_error_for_unknown_service_test() {
   client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
     if (conn->connected()) {
       ++connected;
-      client.call("UnknownService", "Echo", "hello world",
-                  [&](const RpcResponse &response) {
-                    assert(response.getResponseResult() ==
-                           ResponseResult::kUnsuccess);
-                    assert(response.getPayload().empty());
-                    assert(!response.getErrorMessage().empty());
+      client.call(
+          "UnknownService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::METHOD_NOT_FOUND);
+            assert(response.getPayload().empty());
+            assert(!response.getErrorMessage().empty());
 
-                    ++rpcErrorResponseReceived;
-                    client.disconnect();
-                  });
+            ++rpcErrorResponseReceived;
+            client.disconnect();
+          });
     } else {
       server.stop(std::chrono::milliseconds(0));
     }
@@ -294,14 +295,15 @@ void rpc_client_reports_error_when_not_connected_test() {
   InetAddress serverAddr("127.0.0.1", 0);
   RpcClient client(&loop, serverAddr);
 
-  client.call("UnknownService", "Echo", "hello world",
-              [&](const RpcResponse &response) {
-                assert(response.getResponseResult() ==
-                       ResponseResult::kUnsuccess);
-                assert(response.getPayload().empty());
-                assert(!response.getErrorMessage().empty());
-                ++callResponseCnt;
-              });
+  client.call(
+      "UnknownService", "Echo", "hello world",
+      [&](const RpcResponse &response) {
+        assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+        assert(response.getErrorCode() == RpcErrorCode::CONNECTION_UNAVAILABLE);
+        assert(response.getPayload().empty());
+        assert(!response.getErrorMessage().empty());
+        ++callResponseCnt;
+      });
 
   assert(callResponseCnt == 1);
 }
@@ -929,6 +931,7 @@ void rpc_client_reports_timeout_when_server_does_not_respond_test() {
           "service", "method", "payload",
           [&](const RpcResponse &response) {
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::REQUEST_TIMEOUT);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "rpc request timeout");
 
@@ -2055,19 +2058,21 @@ void rpc_client_rejects_call_when_max_pending_requests_is_reached_test() {
   client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
     if (conn->connected()) {
       ++connected;
-      client.call("EchoService", "Echo", "hello world",
-                  [&](const RpcResponse &response) {
-                    assert(response.getResponseResult() ==
-                           ResponseResult::kUnsuccess);
-                    assert(response.getPayload().empty());
-                    assert(response.getErrorMessage() == "connect closed");
-
-                    ++pendingRequestClosed;
-                  });
       client.call(
           "EchoService", "Echo", "hello world",
           [&](const RpcResponse &response) {
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::CONNECTION_CLOSED);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "connect closed");
+
+            ++pendingRequestClosed;
+          });
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::RESOURCE_EXHAUSTED);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "too many pending requests");
 
@@ -3816,16 +3821,17 @@ void rpc_server_returns_error_when_async_handler_throws_test() {
   client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
     if (conn->connected()) {
       ++connected;
-      client.call("EchoService", "Echo", "hello world",
-                  [&](const RpcResponse &response) {
-                    loop.assertInLoopThread();
-                    assert(response.getResponseResult() ==
-                           ResponseResult::kUnsuccess);
-                    assert(response.getPayload().empty());
-                    assert(response.getErrorMessage() == "handler exception");
-                    ++rpcRoundError;
-                    client.disconnect();
-                  });
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            loop.assertInLoopThread();
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::INTERNAL_ERROR);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "handler exception");
+            ++rpcRoundError;
+            client.disconnect();
+          });
     } else {
       ++clientDisconnected;
       server.stop(std::chrono::milliseconds(0));
@@ -4418,6 +4424,7 @@ void rpc_client_sends_cancel_message_for_pending_request_test() {
           "EchoService", "Echo", "hello world",
           [&](const RpcResponse &response) {
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::REQUEST_CANCELED);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "rpc request canceled");
 
@@ -5906,7 +5913,7 @@ void rpc_server_closes_connection_for_unsupported_protocol_version_test() {
         std::abort();
       }
 
-      uint16_t versionNet = 2;
+      uint16_t versionNet = 100;
       versionNet = htons(versionNet);
       ::memcpy(output.data(), &versionNet, sizeof(versionNet));
       codec.send(conn, output.data(), output.size());
@@ -6002,7 +6009,7 @@ void rpc_client_closes_connection_for_unsupported_protocol_version_test() {
           std::abort();
         }
 
-        uint16_t versionNet = 2;
+        uint16_t versionNet = 100;
         versionNet = htons(versionNet);
         ::memcpy(output.data(), &versionNet, sizeof(versionNet));
         codec.send(conn, output.data(), output.length());
@@ -6325,6 +6332,7 @@ void rpc_client_rejects_oversized_request_before_sending_test() {
           "EchoService", "Echo", std::string(30, 'M'),
           [&](const RpcResponse &response) {
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::MESSAGE_TOO_LARGE);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "rpc message too large");
             ++requestCallbackCount;
@@ -6426,6 +6434,7 @@ void rpc_server_returns_error_for_oversized_response_and_remains_available_test(
           [&](const RpcResponse &response) {
             loop.assertInLoopThread();
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::MESSAGE_TOO_LARGE);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "rpc message too large");
             ++firstRequestCallback;
@@ -6435,6 +6444,8 @@ void rpc_server_returns_error_for_oversized_response_and_remains_available_test(
                           loop.assertInLoopThread();
                           assert(response.getResponseResult() ==
                                  ResponseResult::kSuccess);
+                          assert(response.getErrorCode() ==
+                                 RpcErrorCode::NO_ERROR);
                           assert(response.getPayload() == "hello world");
                           assert(response.getErrorMessage().empty());
 
@@ -7003,6 +7014,7 @@ void rpc_client_fails_pending_request_when_reconnect_wait_expires_test() {
           "EchoService", "Echo", "hello world",
           [&](const RpcResponse &response) {
             assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::RECONNECT_TIMEOUT);
             assert(response.getPayload().empty());
             assert(response.getErrorMessage() == "rpc reconnect timeout");
             ++rpcErrorCallbackCount;
@@ -8347,6 +8359,100 @@ void rpc_client_disables_resend_when_per_call_limit_is_zero_test() {
   assert(serverStopped == 1);
 }
 
+void rpc_server_returns_internal_error_for_invalid_async_handler_error_code_test() {
+  int serverFd =
+      ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  assert(serverFd >= 0);
+
+  InetAddress serverAddr("127.0.0.1", 0);
+  socklen_t socketLen = sizeof(sockaddr_in);
+  assert(0 ==
+         ::bind(serverFd,
+                reinterpret_cast<const sockaddr *>(serverAddr.getSockAddr()),
+                socketLen));
+
+  assert(0 ==
+         ::getsockname(serverFd,
+                       reinterpret_cast<sockaddr *>(serverAddr.getSockAddr()),
+                       &socketLen));
+
+  std::promise<void> serverStopCompletePromise;
+  auto serverStopCompleteFuture = serverStopCompletePromise.get_future();
+
+  int connected = 0;
+  int serverHandled = 0;
+  int requestCallback = 0;
+  int clientDisconnected = 0;
+  int serverStopped = 0;
+
+  EventLoop loop;
+  RpcServer server(&loop, serverFd);
+  RpcClient client(&loop, serverAddr);
+
+  server.setStopCompleteCallback([&]() {
+    loop.queueInLoop([&]() {
+      ++serverStopped;
+      serverStopCompletePromise.set_value();
+      loop.quit();
+    });
+  });
+
+  bool registered = server.registerAsyncMethod(
+      "EchoService", "Echo",
+      [&](const std::string &payload, RpcCancellationToken cancellation,
+          RpcServer::RpcReply reply) {
+        ++serverHandled;
+        reply(
+            {ResponseResult::kUnsuccess, RpcErrorCode::ERROR_CODE_CNT, "", ""});
+      });
+  assert(registered);
+
+  server.start();
+
+  client.setConnectionCallback([&](const TcpConnectionPtr &conn) {
+    if (conn->connected()) {
+      ++connected;
+      client.call(
+          "EchoService", "Echo", "hello world",
+          [&](const RpcResponse &response) {
+            loop.assertInLoopThread();
+            assert(response.getResponseResult() == ResponseResult::kUnsuccess);
+            assert(response.getErrorCode() == RpcErrorCode::INTERNAL_ERROR);
+            assert(response.getPayload().empty());
+            assert(response.getErrorMessage() == "invalid handler result");
+            ++requestCallback;
+
+            client.disconnect();
+          });
+    } else {
+      ++clientDisconnected;
+      server.stop(std::chrono::milliseconds(0));
+    }
+  });
+  client.setConnectionErrorCallback([&](int) { std::abort(); });
+  client.connect();
+
+  loop.runAfter(std::chrono::milliseconds(3000), []() {
+    std::cerr << "test timeout" << std::endl;
+    std::abort();
+  });
+
+  loop.loop();
+
+  auto waitForRes =
+      serverStopCompleteFuture.wait_for(std::chrono::milliseconds(2000));
+  if (waitForRes != std::future_status::ready) {
+    std::cerr << "wait for server stop complete timeout" << std::endl;
+    std::abort();
+  }
+
+  assert(connected == 1);
+  assert(serverHandled == 1);
+  assert(requestCallback == 1);
+  assert(clientDisconnected == 1);
+  assert(serverStopped == 1);
+}
+
 int main() {
   rpc_server_processes_echo_request_test();
   rpc_client_calls_echo_service_test();
@@ -8419,4 +8525,5 @@ int main() {
   rpc_client_respects_configured_resend_limit_test();
   rpc_client_uses_per_call_resend_limit_over_default_test();
   rpc_client_disables_resend_when_per_call_limit_is_zero_test();
+  rpc_server_returns_internal_error_for_invalid_async_handler_error_code_test();
 }

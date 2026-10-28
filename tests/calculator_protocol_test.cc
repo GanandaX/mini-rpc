@@ -154,6 +154,7 @@ void rpc_calculator_add_returns_correct_result_test() {
 
       client.add(1, 2, [&](AddResult result) {
         assert(result.status == ResponseResult::kSuccess);
+        assert(result.errorCode == RpcErrorCode::NO_ERROR);
         assert(result.value == 3);
         assert(result.errorMessage.empty());
 
@@ -240,6 +241,7 @@ void rpc_calculator_add_returns_error_on_integer_overflow_test() {
 
       client.add(INT32_MAX, INT32_MAX, [&](AddResult result) {
         assert(result.status == ResponseResult::kUnsuccess);
+        assert(result.errorCode == RpcErrorCode::BUSINESS_ERROR);
         assert(result.errorMessage == "integer overflow");
 
         if (result.status == ResponseResult::kSuccess) {
@@ -467,6 +469,7 @@ void calculator_client_reports_error_for_invalid_result_payload_test() {
 
       client.add(1, 2, [&](AddResult result) {
         assert(result.status == ResponseResult::kUnsuccess);
+        assert(result.errorCode == RpcErrorCode::INTERNAL_ERROR);
         assert(result.value == 0);
         assert(result.errorMessage == "invalid result response");
 
@@ -635,6 +638,7 @@ void calculator_client_uses_default_timeout_and_allows_zero_override_test() {
 
       client.add(1, 2, [&](AddResult result) {
         assert(result.status == ResponseResult::kUnsuccess);
+        assert(result.errorCode == RpcErrorCode::REQUEST_TIMEOUT);
         assert(result.errorMessage == "rpc request timeout");
 
         ++timeoutRequest;
@@ -647,6 +651,7 @@ void calculator_client_uses_default_timeout_and_allows_zero_override_test() {
           1, 2,
           [&](AddResult result) {
             assert(result.status == ResponseResult::kSuccess);
+            assert(result.errorCode == RpcErrorCode::NO_ERROR);
             assert(result.value == 3);
 
             ++successRequest;

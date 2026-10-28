@@ -277,6 +277,7 @@ client.setMaxPendingRequests(1);
 ### 通过 `CalculatorClient::add` 交互
 ``` C++
 // 在连接成功后调用 add()；封装负责参数编码和结果解码，回调通过 status 判断成功或失败，成功读取 value，失败读取 errorMessage。
+// CalculatorClient 通过 AddResult.errorCode 暴露错误码
 // add() 返回的 requestId 可用于 cancel()。
 CalculatorClient client(&loop, serverAddr);
 client.add(1, 2, [&](AddResult result) {
@@ -309,14 +310,16 @@ client.add(1, 2, [&](AddResult result) {
 |Message|Fields|
 | :---: | :---: |
 |Request|version, messageType, requestId, service, method, payload|
-|Response|version, messageType, requestId, result, payload, errorMessage|
+|Response|version, messageType, requestId, result, errorCode, payload, errorMessage|
 |Cancel|version, messageType,requestId|
 
-- `version` 位于每条消息的开头，类型为 `uint16_t`；当前支持的版本为 `1`。
+- `version` 位于每条消息的开头，类型为 `uint16_t`；当前支持的版本为 `2`,暂不兼容v1报文。
 - `requestId` 由客户端生成，服务端原样返回。
 - 客户端用 `requestId` 匹配 pending callback。
 - `service`、`method`、`payload`、`errorMessage` 都是二进制安全字符串。
 - 成功响应的 `errorMessage` 为空；失败响应的 `payload` 为空。
+- errorCode 类型为 uint16_t；成功时必须为 NO_ERROR，失败时必须为已定义的非零错误码。
+- handler 返回的结果若包含非法错误码或状态与错误码不一致，服务端返回 kUnsuccess + INTERNAL_ERROR，错误文字为 "invalid handler result"。
 - `messageType` 位于 version 之后，类型为 `uint8_t`，取值为 `Request`、`Response` 或 `Cancel`。
 - 收到不支持的 `version`、非法 `messageType`，或不符合端点方向的消息类型时，连接会被关闭。
 - 服务端只接收 `Request` 和 `Cancel`；客户端只接收 `Response`。

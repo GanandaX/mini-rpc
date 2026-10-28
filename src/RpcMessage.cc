@@ -252,13 +252,26 @@ size_t RpcRequest::OutputMessageLen(size_t serviceNameLen, size_t methodNameLen,
 }
 
 RpcResponse::RpcResponse()
-    : requestId_(0), responseResult_(ResponseResult::kUnsuccess), payload_(),
-      errorMessage_() {}
+    : requestId_(0), responseResult_(ResponseResult::kUnsuccess),
+      errorCode_(RpcErrorCode::INTERNAL_ERROR), payload_(), errorMessage_() {}
 
 RpcResponse::RpcResponse(uint64_t requestId, ResponseResult responseResult,
                          std::string paylod, std::string errorMessage)
     : requestId_(requestId), responseResult_(responseResult),
-      payload_(std::move(paylod)), errorMessage_(std::move(errorMessage)) {}
+      payload_(std::move(paylod)), errorMessage_(std::move(errorMessage)) {
+  if (responseResult_ == ResponseResult::kSuccess) {
+    errorCode_ = RpcErrorCode::NO_ERROR;
+  } else {
+    errorCode_ = RpcErrorCode::BUSINESS_ERROR;
+  }
+}
+
+RpcResponse::RpcResponse(uint64_t requestId, ResponseResult responseResult,
+                         RpcErrorCode errorCode, std::string paylod,
+                         std::string errorMessage)
+    : requestId_(requestId), responseResult_(responseResult),
+      errorCode_(errorCode), payload_(std::move(paylod)),
+      errorMessage_(std::move(errorMessage)) {}
 
 bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
   if (payload_.length() > UINT32_MAX || errorMessage_.length() > UINT32_MAX) {
@@ -280,6 +293,20 @@ bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
     return false;
   }
 
+  if (static_cast<uint16_t>(errorCode_) >=
+      static_cast<uint16_t>(RpcErrorCode::ERROR_CODE_CNT)) {
+    errorMessage.append("error code invalid");
+    return false;
+  }
+
+  if ((responseResult_ == ResponseResult::kSuccess &&
+       errorCode_ != RpcErrorCode::NO_ERROR) ||
+      (responseResult_ == ResponseResult::kUnsuccess &&
+       errorCode_ == RpcErrorCode::NO_ERROR)) {
+    errorMessage.append("response result and error code not Compatible");
+    return false;
+  }
+
   size_t msgLen = OutputMessageLen(payload_.length(), errorMessage_.length());
 
   // VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN +
@@ -292,11 +319,13 @@ bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
   size_t index = 0;
   uint16_t versionNet = kRpcProtocolVersion;
   uint64_t requestIdNet = requestId_;
+  uint16_t errorCodeNet = static_cast<uint16_t>(errorCode_);
   uint32_t payloadLenNet = payload_.length();
   uint32_t errorMessageLenNet = errorMessage_.length();
 
   versionNet = hton(versionNet);
   requestIdNet = hton(requestIdNet);
+  errorCodeNet = hton(errorCodeNet);
   payloadLenNet = hton(payloadLenNet);
   errorMessageLenNet = hton(errorMessageLenNet);
 
@@ -311,6 +340,8 @@ bool RpcResponse::encode(std::string &output, std::string &errorMessage) const {
   index += sizeof(requestIdNet);
   ::memcpy(data + index, &responseResult, sizeof(responseResult));
   index += sizeof(responseResult);
+  ::memcpy(data + index, &errorCodeNet, sizeof(errorCodeNet));
+  index += sizeof(errorCodeNet);
   ::memcpy(data + index, &payloadLenNet, sizeof(payloadLenNet));
   index += sizeof(payloadLenNet);
   ::memcpy(data + index, payload_.data(), payload_.length());
@@ -391,6 +422,30 @@ bool RpcResponse::decode(std::string requestMsg, std::string &errorMsg) {
     return false;
   }
 
+  uint16_t errorCodeNet;
+  uint16_t errorCode;
+  if (leftLen < sizeof(uint16_t)) {
+    errorMsg.append("response result length error");
+    return false;
+  }
+  ::memcpy(&errorCodeNet, data + index, sizeof(errorCodeNet));
+  errorCode = ntoh(errorCodeNet);
+  leftLen -= sizeof(errorCodeNet);
+  index += sizeof(errorCodeNet);
+
+  if (errorCode >= static_cast<uint16_t>(RpcErrorCode::ERROR_CODE_CNT)) {
+    errorMsg.append("error code invalid");
+    return false;
+  }
+
+  if ((success == static_cast<uint8_t>(ResponseResult::kSuccess) &&
+       errorCode != static_cast<uint16_t>(RpcErrorCode::NO_ERROR)) ||
+      (success == static_cast<uint8_t>(ResponseResult::kUnsuccess) &&
+       errorCode == static_cast<uint16_t>(RpcErrorCode::NO_ERROR))) {
+    errorMsg.append("response result and error code not Compatible");
+    return false;
+  }
+
   std::string payload;
   std::string errorMessage;
 
@@ -416,7 +471,8 @@ bool RpcResponse::decode(std::string requestMsg, std::string &errorMsg) {
   }
 
   requestId_ = requestIdHost;
-  responseResult_ = (ResponseResult)success;
+  responseResult_ = static_cast<ResponseResult>(success);
+  errorCode_ = static_cast<RpcErrorCode>(errorCode);
   payload_ = std::move(payload);
   errorMessage_ = std::move(errorMessage);
 
@@ -429,6 +485,8 @@ ResponseResult RpcResponse::getResponseResult() const {
   return responseResult_;
 }
 
+RpcErrorCode RpcResponse::getErrorCode() const { return errorCode_; }
+
 std::string RpcResponse::getPayload() const { return payload_; }
 
 std::string RpcResponse::getErrorMessage() const { return errorMessage_; }
@@ -436,7 +494,8 @@ std::string RpcResponse::getErrorMessage() const { return errorMessage_; }
 size_t RpcResponse::OutputMessageLen(size_t payloadLen,
                                      size_t errorMessageLen) {
   return VERSION_LEN + REQUEST_TYPE_LEN + REQUEST_ID_LEN + RESPONSE_RESULT_LEN +
-         PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN + payloadLen + errorMessageLen;
+         ERROR_CODE_LEN + PALOAD_MESSAGE_LEN + ERROR_MESSAGE_LEN + payloadLen +
+         errorMessageLen;
 }
 
 RpcCancel::RpcCancel() : requestId_(0) {}

@@ -80,8 +80,8 @@ private:
   void onConnection(const TcpConnectionPtr &conn);
   void onRpcMessage(const TcpConnectionPtr &conn, const std::string &msg);
   void onConnectionError(int errorCode);
-  void failAllPendingRequests(std::string errorMessage);
-  void failAllDisreconnectRequests(std::string errorMessage);
+  void failAllPendingRequests(RpcErrorCode errorCode, std::string errorMessage);
+  void failAllDisreconnectRequests(RpcErrorCode errorCode, std::string errorMessage);
   void onRequestTimeout(uint64_t requestId);
   void onReconnectTimeout(uint64_t requestId);
 

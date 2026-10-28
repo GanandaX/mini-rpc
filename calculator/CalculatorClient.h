@@ -11,6 +11,7 @@
 
 struct AddResult {
   ResponseResult status;
+  RpcErrorCode errorCode;
   int32_t value;
   std::string errorMessage;
 };

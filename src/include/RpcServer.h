@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include "EventLoop.h"
 #include "LengthHeaderCodec.h"
@@ -30,7 +31,29 @@ private:
 class RpcServer {
 public:
   struct RpcResult {
+    RpcResult()
+        : RpcResult(ResponseResult::kUnsuccess, RpcErrorCode::INTERNAL_ERROR,
+                    "", "") {}
+
+    RpcResult(ResponseResult resultValue, std::string payloadValue,
+              std::string errorMessageValue)
+        : RpcResult(resultValue, RpcErrorCode::NO_ERROR,
+                    std::move(payloadValue), std::move(errorMessageValue)) {
+      if (resultValue == ResponseResult::kSuccess) {
+        errorCode = RpcErrorCode::NO_ERROR;
+      } else if (resultValue == ResponseResult::kUnsuccess) {
+        errorCode = RpcErrorCode::BUSINESS_ERROR;
+      }
+    }
+
+    RpcResult(ResponseResult resultValue, RpcErrorCode errorCodeValue,
+              std::string payloadValue, std::string errorMessageValue)
+        : result(resultValue), errorCode(errorCodeValue),
+          payload(std::move(payloadValue)),
+          errorMessage(std::move(errorMessageValue)) {}
+
     ResponseResult result;
+    RpcErrorCode errorCode;
     std::string payload;
     std::string errorMessage;
   };
@@ -69,7 +92,7 @@ private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 
   void sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
-                    ResponseResult responseResult, std::string payload,
+                    ResponseResult responseResult, RpcErrorCode errorCode, std::string payload,
                     std::string errorMessage);
 
   bool isRegistered(const std::string &service, const std::string &method);

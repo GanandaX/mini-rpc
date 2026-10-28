@@ -76,12 +76,12 @@ void RpcClient::disconnect() {
   tcpClient_.disconnect();
 
   if (status_ != Status::kConnected && status_ != Status::kConnecting) {
-    failAllPendingRequests("connect closed");
+    failAllPendingRequests(RpcErrorCode::CONNECTION_CLOSED, "connect closed");
   } else if (status_ == Status::kConnected) {
     status_ = Status::kDisconnecting;
   } else if (status_ == Status::kConnecting) {
     status_ = Status::kDisconnected;
-    failAllPendingRequests("connect closed");
+    failAllPendingRequests(RpcErrorCode::CONNECTION_CLOSED, "connect closed");
   }
 }
 
@@ -211,9 +211,10 @@ void RpcClient::onConnection(const TcpConnectionPtr &conn) {
     conn_.reset();
 
     if (manualDisconnection_) {
-      failAllPendingRequests("connect closed");
+      failAllPendingRequests(RpcErrorCode::CONNECTION_CLOSED, "connect closed");
     } else {
-      failAllDisreconnectRequests("connect closed");
+      failAllDisreconnectRequests(RpcErrorCode::CONNECTION_CLOSED,
+                                  "connect closed");
     }
     clearIgnoredResponseRequests();
 
@@ -281,14 +282,16 @@ void RpcClient::onConnectionError(int errorCode) {
 
   conn_.reset();
   status_ = Status::kDisconnected;
-  failAllDisreconnectRequests("connection error");
+  failAllDisreconnectRequests(RpcErrorCode::CONNECTION_UNAVAILABLE,
+                              "connection error");
   clearIgnoredResponseRequests();
   if (connectionErrorCallback_) {
     connectionErrorCallback_(errorCode);
   }
 }
 
-void RpcClient::failAllPendingRequests(std::string errorMessage) {
+void RpcClient::failAllPendingRequests(RpcErrorCode errorCode,
+                                       std::string errorMessage) {
   loop_->assertInLoopThread();
 
   std::unordered_map<uint64_t, PendingRequest> temp;
@@ -301,13 +304,14 @@ void RpcClient::failAllPendingRequests(std::string errorMessage) {
   }
 
   for (auto &item : temp) {
-    RpcResponse response(item.first, ResponseResult::kUnsuccess, "",
+    RpcResponse response(item.first, ResponseResult::kUnsuccess, errorCode, "",
                          errorMessage);
     (item.second.callback)(response);
   }
 }
 
-void RpcClient::failAllDisreconnectRequests(std::string errorMessage) {
+void RpcClient::failAllDisreconnectRequests(RpcErrorCode errorCode,
+                                            std::string errorMessage) {
   loop_->assertInLoopThread();
 
   std::vector<uint64_t> waitingToChangePhase;
@@ -362,7 +366,7 @@ void RpcClient::failAllDisreconnectRequests(std::string errorMessage) {
   }
 
   for (auto &item : callbacks) {
-    RpcResponse response(item.first, ResponseResult::kUnsuccess, "",
+    RpcResponse response(item.first, ResponseResult::kUnsuccess, errorCode, "",
                          errorMessage);
     item.second(response);
   }
@@ -389,7 +393,8 @@ void RpcClient::onRequestTimeout(uint64_t requestId) {
 
   sendCancel(requestId);
 
-  RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+  RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                       RpcErrorCode::REQUEST_TIMEOUT, "",
                        "rpc request timeout");
   (pendingRequest.callback)(response);
 }
@@ -412,7 +417,8 @@ void RpcClient::onReconnectTimeout(uint64_t requestId) {
     PendingRequest pendingRequest = std::move(findRes->second);
     pendingRequests_.erase(findRes);
 
-    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+    RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                         RpcErrorCode::RECONNECT_TIMEOUT, "",
                          "rpc reconnect timeout");
     (pendingRequest.callback)(response);
     return;
@@ -435,6 +441,9 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
   assert(timeout >= std::chrono::milliseconds{0});
   assert(cb != nullptr);
 
+  RpcErrorCode errorCode = RpcErrorCode::NO_ERROR;
+  std::string errorMessage;
+
   do {
     if ((status_ == Status::kConnected) && (conn_ != nullptr) &&
         (conn_->connected())) {
@@ -444,7 +453,8 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
            outputMessageLen > LengthHeaderCodec::kMaxMessageSize) ||
           (maxMessageSize_.has_value() &&
            outputMessageLen > maxMessageSize_.value())) {
-        RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+        RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                             RpcErrorCode::MESSAGE_TOO_LARGE, "",
                              "rpc message too large");
         cb(response);
         return;
@@ -452,7 +462,8 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
 
       if (maxPendingRequests_.has_value() &&
           pendingRequests_.size() >= maxPendingRequests_) {
-        RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+        RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                             RpcErrorCode::RESOURCE_EXHAUSTED, "",
                              "too many pending requests");
         cb(response);
         return;
@@ -463,6 +474,8 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
       std::string errorMsg;
       bool res = request.encode(output, errorMsg);
       if (!res || !errorMsg.empty()) {
+        errorCode = RpcErrorCode::INTERNAL_ERROR;
+        errorMessage = "encode error";
         break;
       }
 
@@ -496,8 +509,13 @@ void RpcClient::callInLoop(uint64_t requestId, const std::string &service,
     }
   } while (false);
 
-  RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
-                       "connection not connected or encode error");
+  if (errorCode == RpcErrorCode::NO_ERROR) {
+    errorCode = RpcErrorCode::CONNECTION_UNAVAILABLE;
+    errorMessage = "connection not connected";
+  }
+
+  RpcResponse response(requestId, ResponseResult::kUnsuccess, errorCode, "",
+                       errorMessage);
   cb(response);
 }
 
@@ -554,7 +572,8 @@ void RpcClient::cancelInLoop(uint64_t requestId) {
 
   sendCancel(requestId);
 
-  RpcResponse response{requestId, ResponseResult::kUnsuccess, "",
+  RpcResponse response{requestId, ResponseResult::kUnsuccess,
+                       RpcErrorCode::REQUEST_CANCELED, "",
                        "rpc request canceled"};
   callback(response);
 }
@@ -618,7 +637,8 @@ void RpcClient::checkReconnect() {
     bool res = request.encode(output, errorMsg);
     if (!res || !errorMsg.empty()) {
       auto callback = std::move(it->second.callback);
-      RpcResponse response(it->first, ResponseResult::kUnsuccess, "", errorMsg);
+      RpcResponse response(it->first, ResponseResult::kUnsuccess,
+                           RpcErrorCode::INTERNAL_ERROR, "", errorMsg);
       pendingRequests_.erase(it->first);
       callback(response);
       continue;

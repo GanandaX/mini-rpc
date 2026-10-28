@@ -37,8 +37,9 @@ private:
 
 namespace {
 void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
-                    ResponseResult responseResult, std::string payload,
-                    std::string errorMessage, size_t maxMessageSize) {
+                    ResponseResult responseResult, RpcErrorCode errorCode,
+                    std::string payload, std::string errorMessage,
+                    size_t maxMessageSize) {
 
   size_t outputMessageLen =
       RpcResponse::OutputMessageLen(payload.length(), errorMessage.length());
@@ -49,7 +50,8 @@ void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
       return;
     }
 
-    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+    RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                         RpcErrorCode::MESSAGE_TOO_LARGE, "",
                          "rpc message too large");
     std::string outputMessage;
     errorMessage.clear();
@@ -66,7 +68,8 @@ void sendFramedData(const TcpConnectionPtr &conn, uint64_t requestId,
     return;
   }
 
-  RpcResponse response(requestId, responseResult, payload, errorMessage);
+  RpcResponse response(requestId, responseResult, errorCode, payload,
+                       errorMessage);
   std::string outputMessage;
   errorMessage.clear();
   bool res = response.encode(outputMessage, errorMessage);
@@ -461,13 +464,15 @@ void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
     return;
   }
 
-  sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess, "",
+  sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess,
+               RpcErrorCode::METHOD_NOT_FOUND, "",
                "service or method not exist");
   return;
 }
 
 void RpcServer::sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
-                             ResponseResult responseResult, std::string payload,
+                             ResponseResult responseResult,
+                             RpcErrorCode errorCode, std::string payload,
                              std::string errorMessage) {
 
   size_t outputMessageLen =
@@ -481,7 +486,8 @@ void RpcServer::sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
       return;
     }
 
-    RpcResponse response(requestId, ResponseResult::kUnsuccess, "",
+    RpcResponse response(requestId, ResponseResult::kUnsuccess,
+                         RpcErrorCode::MESSAGE_TOO_LARGE, "",
                          "rpc message too large");
     std::string outputMessage;
     errorMessage.clear();
@@ -498,7 +504,8 @@ void RpcServer::sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
     return;
   }
 
-  RpcResponse response(requestId, responseResult, payload, errorMessage);
+  RpcResponse response(requestId, responseResult, errorCode, payload,
+                       errorMessage);
   std::string outputMessage;
   errorMessage.clear();
   bool res = response.encode(outputMessage, errorMessage);
@@ -556,8 +563,8 @@ void RpcServer::invokeSyncHandler(const TcpConnectionPtr &conn,
   try {
     rpcResult = handler(request.getPayload());
   } catch (...) {
-    sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess, "",
-                 "handler exception");
+    sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess,
+                 RpcErrorCode::INTERNAL_ERROR, "", "handler exception");
     return;
   }
 
@@ -566,14 +573,20 @@ void RpcServer::invokeSyncHandler(const TcpConnectionPtr &conn,
       (rpcResult.result == ResponseResult::kSuccess &&
        !rpcResult.errorMessage.empty()) ||
       (rpcResult.result != ResponseResult::kSuccess &&
-       rpcResult.result != ResponseResult::kUnsuccess)) {
-    sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess, "",
-                 "invalid handler result");
+       rpcResult.result != ResponseResult::kUnsuccess) ||
+      rpcResult.errorCode >= RpcErrorCode::ERROR_CODE_CNT ||
+      (rpcResult.result == ResponseResult::kSuccess &&
+       rpcResult.errorCode != RpcErrorCode::NO_ERROR) ||
+      (rpcResult.result == ResponseResult::kUnsuccess &&
+       rpcResult.errorCode == RpcErrorCode::NO_ERROR)) {
+    sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess,
+                 RpcErrorCode::INTERNAL_ERROR, "", "invalid handler result");
     return;
   }
 
   sendResponse(conn, request.getRequestId(), rpcResult.result,
-               std::move(rpcResult.payload), std::move(rpcResult.errorMessage));
+               rpcResult.errorCode, std::move(rpcResult.payload),
+               std::move(rpcResult.errorMessage));
 }
 
 void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
@@ -594,7 +607,8 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
       conn->forceClose();
     } else if (res == RegisterTokenStatus::kConnectionLimitReached ||
                res == RegisterTokenStatus::kGlobalLimitReached) {
-      sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess, "",
+      sendResponse(conn, request.getRequestId(), ResponseResult::kUnsuccess,
+                   RpcErrorCode::RESOURCE_EXHAUSTED, "",
                    "server request limit reached");
     }
     return;
@@ -623,8 +637,14 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
         (rpcResult.result == ResponseResult::kSuccess &&
          !rpcResult.errorMessage.empty()) ||
         (rpcResult.result != ResponseResult::kSuccess &&
-         rpcResult.result != ResponseResult::kUnsuccess)) {
-      rpcResult = {ResponseResult::kUnsuccess, "", "invalid handler result"};
+         rpcResult.result != ResponseResult::kUnsuccess) ||
+        (rpcResult.result == ResponseResult::kSuccess &&
+         rpcResult.errorCode != RpcErrorCode::NO_ERROR) ||
+        (rpcResult.result == ResponseResult::kUnsuccess &&
+         rpcResult.errorCode == RpcErrorCode::NO_ERROR) ||
+        (rpcResult.errorCode >= RpcErrorCode::ERROR_CODE_CNT)) {
+      rpcResult = {ResponseResult::kUnsuccess, RpcErrorCode::INTERNAL_ERROR, "",
+                   "invalid handler result"};
     }
 
     conn->loop()->queueInLoop(
@@ -648,9 +668,10 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
           size_t effectiveMaxMessageSize =
               maxMessageSize->value_or(LengthHeaderCodec::kMaxMessageSize);
 
-          sendFramedData(
-              conn, requestId, rpcResult.result, std::move(rpcResult.payload),
-              std::move(rpcResult.errorMessage), effectiveMaxMessageSize);
+          sendFramedData(conn, requestId, rpcResult.result, rpcResult.errorCode,
+                         std::move(rpcResult.payload),
+                         std::move(rpcResult.errorMessage),
+                         effectiveMaxMessageSize);
         });
   };
 
@@ -659,7 +680,8 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
         try {
           handler(request.getPayload(), token, reply);
         } catch (...) {
-          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess, "",
+          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess,
+                                     RpcErrorCode::INTERNAL_ERROR, "",
                                      "handler exception"});
           return;
         }

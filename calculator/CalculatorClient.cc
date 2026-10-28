@@ -52,13 +52,16 @@ RpcCallback CalculatorClient::wrapAddCallback(AddCallback callback) {
       bool result =
           calculatorAdd.resultDecode(response.getPayload(), errorMessage);
       if (!result || !errorMessage.empty()) {
-        addCallback({ResponseResult::kUnsuccess, 0, errorMessage});
+        addCallback({ResponseResult::kUnsuccess, RpcErrorCode::INTERNAL_ERROR,
+                     0, errorMessage});
         return;
       }
 
-      addCallback({ResponseResult::kSuccess, calculatorAdd.getResult(), ""});
+      addCallback({ResponseResult::kSuccess, RpcErrorCode::NO_ERROR,
+                   calculatorAdd.getResult(), ""});
     } else {
-      addCallback({ResponseResult::kUnsuccess, 0, response.getErrorMessage()});
+      addCallback({ResponseResult::kUnsuccess, response.getErrorCode(), 0,
+                   response.getErrorMessage()});
     }
   };
 }
