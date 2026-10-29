@@ -5,11 +5,14 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <vector>
 
 enum class TaskThreadPoolStatus { NOT_START, RUNNING, STOPPING, STOPPED };
+
+enum class TaskSubmitResult { kAccepted, kNotRunning, kQueueFull, kEmptyTask };
 
 class TaskThreadPool {
 public:
@@ -23,7 +26,9 @@ public:
    */
   void stop();
 
-  bool addTask(std::function<void()> task);
+  TaskSubmitResult addTask(std::function<void()> task);
+
+  void setMaxQueueTasks(size_t maxQueueTasks);
 
 private:
   void run();
@@ -31,6 +36,7 @@ private:
 private:
   TaskThreadPoolStatus status_;
   uint8_t threadCnt_;
+  std::optional<size_t> maxQueueTasks_;
   std::mutex mutex_;
   std::condition_variable condition_;
   std::vector<std::thread> threads_;

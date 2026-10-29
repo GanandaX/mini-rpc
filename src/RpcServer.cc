@@ -425,6 +425,15 @@ void RpcServer::setWorkerThreadNum(uint8_t workThreadNum) {
   taskPool_ = std::make_unique<TaskThreadPool>(workThreadNum);
 }
 
+void RpcServer::setMaxWorkerQueue(size_t maxWorkerQueue) {
+  loop_->assertInLoopThread();
+  assert(status_ == Status::kNotStarted);
+  assert(maxWorkerQueue > 0);
+  assert(taskPool_);
+
+  taskPool_->setMaxQueueTasks(maxWorkerQueue);
+}
+
 void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
                              const std::string &msg) {
   if (msg.empty()) {
@@ -707,11 +716,27 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
   };
 
   if (taskPool_) {
-    bool res = taskPool_->addTask(functor);
-    if (!res) {
-      reply(RpcResult{ResponseResult::kUnsuccess, RpcErrorCode::INTERNAL_ERROR,
-                      "", "add to task pool failed"});
+    TaskSubmitResult res = taskPool_->addTask(functor);
+
+    if (res == TaskSubmitResult::kAccepted) {
+      return;
     }
+
+    RpcErrorCode errorCode;
+    std::string errorMessage;
+
+    if (res == TaskSubmitResult::kNotRunning) {
+      errorCode = RpcErrorCode::INTERNAL_ERROR;
+      errorMessage = "task pool not running";
+    } else if (res == TaskSubmitResult::kQueueFull) {
+      errorCode = RpcErrorCode::RESOURCE_EXHAUSTED;
+      errorMessage = "task queue full";
+    } else if (res == TaskSubmitResult::kEmptyTask) {
+      errorCode = RpcErrorCode::INTERNAL_ERROR;
+      errorMessage = "empty task";
+    }
+
+    reply(RpcResult{ResponseResult::kUnsuccess, errorCode, "", errorMessage});
     return;
   }
 

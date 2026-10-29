@@ -91,6 +91,8 @@ public:
 
   void setWorkerThreadNum(uint8_t workThreadNum);
 
+  void setMaxWorkerQueue(size_t maxWorkerQueue);
+
 private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 

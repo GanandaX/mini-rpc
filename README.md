@@ -84,6 +84,17 @@ server.setWorkerThreadNum(4);
 <br>
 
 ``` C++
+// 设置业务线程池的最大排队任务数，必须大于零
+// 默认不限制，只统计排队任务；在 setWorkerThreadNum() 之后、首次 start() 前由 base loop 设置；
+// 队列满返回 RESOURCE_EXHAUSTED 和 "task queue full";
+RpcServer server(&loop, serverFd);
+server.setWorkerThreadNum(1);
+server.setMaxWorkerQueue(1);
+
+```
+<br>
+
+``` C++
 // 设置消息收发的最大字节数(整个rpc消息的所有字节数,不包括LengthHeaderCodec 附加的 4 字节长度头),可配置长度[1, 64MiB]
 // 如果配置得小到连这个失败响应也放不下，服务端会关闭连接。
 // 未调用 setMaxMessageSize() 时，生效上限为 LengthHeaderCodec::kMaxMessageSize，即 64 MiB。

@@ -67,23 +67,41 @@ void TaskThreadPool::stop() {
   }
 }
 
-bool TaskThreadPool::addTask(std::function<void()> task) {
+TaskSubmitResult TaskThreadPool::addTask(std::function<void()> task) {
   if (!task) {
-    return false;
+    return TaskSubmitResult::kEmptyTask;
   }
 
   {
     std::unique_lock<std::mutex> locker(mutex_);
 
     if (status_ != TaskThreadPoolStatus::RUNNING) {
-      return false;
+      return TaskSubmitResult::kNotRunning;
+    }
+
+    if (maxQueueTasks_.has_value() && tasks_.size() >= maxQueueTasks_.value()) {
+      return TaskSubmitResult::kQueueFull;
     }
 
     tasks_.emplace(std::move(task));
   }
 
   condition_.notify_one();
-  return true;
+  return TaskSubmitResult::kAccepted;
+}
+
+void TaskThreadPool::setMaxQueueTasks(size_t maxQueueTasks) {
+  assert(maxQueueTasks > 0);
+
+  {
+    std::unique_lock<std::mutex> locker(mutex_);
+
+    if (status_ != TaskThreadPoolStatus::NOT_START || maxQueueTasks < 1) {
+      return;
+    }
+
+    maxQueueTasks_ = maxQueueTasks;
+  }
 }
 
 void TaskThreadPool::run() {
