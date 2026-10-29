@@ -11,6 +11,7 @@ add_library(mini_rpc
     src/RpcMessage.cc
     src/RpcServer.cc
     src/RpcClient.cc
+    src/TaskThreadPool.cc
 )
 
 target_include_directories(mini_rpc PUBLIC
@@ -52,6 +53,7 @@ if (BUILD_TESTING)
 
     add_mini_test(rpc_message_test)
     add_mini_test(rpc_server_test)
+    add_mini_test(task_thread_pool_test)
 endif()
 
 

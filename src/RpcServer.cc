@@ -206,7 +206,8 @@ void CancellationRegistry::clearConnectionCancellations(
 }
 
 RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
-    : loop_(loop), status_(Status::kNotStarted) {
+    : loop_(loop), status_(Status::kNotStarted), tcpServerStopped_(false),
+      taskPoolStopped_(false) {
   assert(loop != nullptr);
   assert(listenFd >= 0);
   assert(threadNum >= 0);
@@ -233,12 +234,7 @@ RpcServer::RpcServer(EventLoop *loop, int listenFd, int threadNum)
   server_->setPeerHalfCloseCallback(
       [](const TcpConnectionPtr &conn) { conn->shutdown(); });
 
-  server_->setStopCompleteCallback([this]() {
-    status_ = Status::kStopped;
-    if (stopCompleteCallback_) {
-      stopCompleteCallback_();
-    }
-  });
+  server_->setStopCompleteCallback([this]() { onTcpServerStopped(); });
 }
 
 void RpcServer::start() {
@@ -246,6 +242,11 @@ void RpcServer::start() {
   if (status_ != Status::kNotStarted) {
     return;
   }
+
+  if (taskPool_) {
+    taskPool_->start();
+  }
+
   status_ = Status::kRunning;
   server_->start();
 }
@@ -257,6 +258,16 @@ void RpcServer::stop(std::chrono::milliseconds gracePeriod) {
     return;
   }
   status_ = Status::kStopping;
+
+  if (taskPool_) {
+    taskPoolStopThread_ = std::thread([&]() {
+      taskPool_->stop();
+      loop_->queueInLoop([&]() { onTaskPoolStopped(); });
+    });
+  } else {
+    onTaskPoolStopped();
+  }
+
   server_->stop(gracePeriod);
 }
 
@@ -403,6 +414,15 @@ void RpcServer::setMaxMessageSize(size_t maxMessageSize) {
   assert(maxMessageSize <= LengthHeaderCodec::kMaxMessageSize);
 
   *maxMessageSize_ = maxMessageSize;
+}
+
+void RpcServer::setWorkerThreadNum(uint8_t workThreadNum) {
+  loop_->assertInLoopThread();
+  assert(status_ == Status::kNotStarted);
+  assert(workThreadNum > 0);
+  assert(!taskPool_);
+
+  taskPool_ = std::make_unique<TaskThreadPool>(workThreadNum);
 }
 
 void RpcServer::onRpcMessage(const TcpConnectionPtr &conn,
@@ -675,19 +695,59 @@ void RpcServer::invokeAsyncHandler(const TcpConnectionPtr &conn,
         });
   };
 
-  conn->loop()->runInLoop(
-      [request, handler, reply, token = cancellationToken]() {
-        try {
-          handler(request.getPayload(), token, reply);
-        } catch (...) {
-          reply(RpcServer::RpcResult{ResponseResult::kUnsuccess,
-                                     RpcErrorCode::INTERNAL_ERROR, "",
-                                     "handler exception"});
-          return;
-        }
-      });
+  auto functor = [request, handler, reply, token = cancellationToken]() {
+    try {
+      handler(request.getPayload(), token, reply);
+    } catch (...) {
+      reply(RpcServer::RpcResult{ResponseResult::kUnsuccess,
+                                 RpcErrorCode::INTERNAL_ERROR, "",
+                                 "handler exception"});
+      return;
+    }
+  };
+
+  if (taskPool_) {
+    bool res = taskPool_->addTask(functor);
+    if (!res) {
+      reply(RpcResult{ResponseResult::kUnsuccess, RpcErrorCode::INTERNAL_ERROR,
+                      "", "add to task pool failed"});
+    }
+    return;
+  }
+
+  conn->loop()->runInLoop(functor);
 }
 
 void RpcServer::cancelAsync(const TcpConnectionPtr &conn, uint64_t requestId) {
   cancellationRegistry_->cancel(conn, requestId);
+}
+
+void RpcServer::onTcpServerStopped() {
+  loop_->assertInLoopThread();
+  tcpServerStopped_ = true;
+  tryCompleteStop();
+}
+
+void RpcServer::onTaskPoolStopped() {
+  loop_->assertInLoopThread();
+  taskPoolStopped_ = true;
+  tryCompleteStop();
+}
+
+void RpcServer::tryCompleteStop() {
+  loop_->assertInLoopThread();
+  if (status_ != Status::kStopping) {
+    return;
+  }
+
+  if (tcpServerStopped_ && taskPoolStopped_) {
+    if (taskPoolStopThread_.joinable()) {
+      taskPoolStopThread_.join();
+    }
+
+    status_ = Status::kStopped;
+    if (stopCompleteCallback_) {
+      stopCompleteCallback_();
+    }
+  }
 }

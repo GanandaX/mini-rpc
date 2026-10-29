@@ -13,7 +13,6 @@
 本版本不包含：
 - 复杂参数与复杂序列化；
 - 服务发现、负载均衡、注册中心；
-- 服务端业务线程池调度；
 
 ## Build and run
 
@@ -71,6 +70,18 @@ pid: 311062
 
 ## 基本用法
 ### 服务端：
+
+``` C++
+// 为server设置工作线程数
+// setWorkerThreadNum只能在首次 start() 前、base loop 中设置一次，数量必须大于零。stop() 不在 base loop 等待业务任务
+// 停止完成回调会等 TCP 停止、线程池已接收的任务执行完并退出后触发。这里等待的是 handler 任务返回，不包含 handler 自行安排的外部异步工作
+// 当注册了异步方法且设置了工作线程后，服务端的异步处理模块都会将其交给工作线程池处理。未配置业务线程池时，异步 handler 在连接所属的 IO loop 执行
+// 已经完成的请求不会再收到失败回调，允许重发的请求还会按重发配置处理断线
+RpcServer server(&loop, serverFd);
+server.setWorkerThreadNum(4);
+
+```
+<br>
 
 ``` C++
 // 设置消息收发的最大字节数(整个rpc消息的所有字节数,不包括LengthHeaderCodec 附加的 4 字节长度头),可配置长度[1, 64MiB]
@@ -329,9 +340,8 @@ client.add(1, 2, [&](AddResult result) {
 - `EventLoop` 由调用方拥有；
 - `RpcServer` 拥有 `TcpServer` 和服务端 codec；
 - `RpcClient` 拥有 `TcpClient` 和客户端 codec；
-- handler 在连接所属 IO loop 执行；
+- 同步 handler 始终在连接所属 IO loop 执行；异步 handler 根据是否配置业务线程池选择执行线程；
 - client 的连接回调和 RPC callback 在 client EventLoop 执行；
-- `threadNum == 0` 时服务端 handler 在 base EventLoop 执行。
 - `call`支持跨线程调用，但对应的回调函数仍在 `RpcClient` 所在的 `EventLoop` 中执行。
 - `cancel`支持跨线程调用，但对应的回调函数仍在 `RpcClient` 所在的 `EventLoop` 中执行。
 
@@ -354,5 +364,4 @@ client.add(1, 2, [&](AddResult result) {
 ## 当前限制
 
 - 复杂序列化
-- 服务端业务线程池
 - 服务发现

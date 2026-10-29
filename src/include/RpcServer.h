@@ -11,6 +11,7 @@
 #include "EventLoop.h"
 #include "LengthHeaderCodec.h"
 #include "RpcMessage.h"
+#include "TaskThreadPool.h"
 #include "TcpServer.h"
 
 class CancellationRegistry;
@@ -88,12 +89,14 @@ public:
 
   void setMaxMessageSize(size_t maxMessageSize);
 
+  void setWorkerThreadNum(uint8_t workThreadNum);
+
 private:
   void onRpcMessage(const TcpConnectionPtr &, const std::string &);
 
   void sendResponse(const TcpConnectionPtr &conn, uint64_t requestId,
-                    ResponseResult responseResult, RpcErrorCode errorCode, std::string payload,
-                    std::string errorMessage);
+                    ResponseResult responseResult, RpcErrorCode errorCode,
+                    std::string payload, std::string errorMessage);
 
   bool isRegistered(const std::string &service, const std::string &method);
 
@@ -109,12 +112,24 @@ private:
 
   void cancelAsync(const TcpConnectionPtr &conn, uint64_t requestId);
 
+  void onTcpServerStopped();
+
+  void onTaskPoolStopped();
+
+  void tryCompleteStop();
+
 private:
   enum class Status { kNotStarted, kRunning, kStopping, kStopped };
 
   std::shared_ptr<std::optional<size_t>> maxMessageSize_;
   EventLoop *loop_;
   Status status_;
+  bool tcpServerStopped_;
+  bool taskPoolStopped_;
+
+  std::unique_ptr<TaskThreadPool> taskPool_;
+  std::thread taskPoolStopThread_;
+
   LengthHeaderCodec lengthHeaderCodec_;
   std::unique_ptr<TcpServer> server_;
   std::unordered_map<std::string, std::unordered_map<std::string, RpcHandler>>
